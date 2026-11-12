@@ -16,6 +16,7 @@ export interface UsageRecordInput {
   readonly model: string;
   readonly usage: TokenUsage;
   readonly source?: AgentLLMRequestSource;
+  readonly requestId?: string;
 }
 
 export class UsageAgentModel extends AgentModel<UsageModelState> {
@@ -44,6 +45,7 @@ export class UsageAgentModel extends AgentModel<UsageModelState> {
         model: input.model,
         usage: input.usage,
         usageScope,
+        requestId: input.requestId,
       }),
     );
     const turnId = input.source?.type === 'turn' ? input.source.turnId : undefined;

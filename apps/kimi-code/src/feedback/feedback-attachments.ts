@@ -27,20 +27,23 @@ const CODEBASE_SCAN_TIMEOUT_MS = 3000;
  * Returns `true` when at least one requested attachment failed so the caller
  * can surface a partial-failure status.
  */
+const MAX_FEEDBACK_REQUEST_IDS = 50;
+
 export async function submitFeedbackWithAttachments(
   host: SlashCommandHost,
   feedbackId: number,
   level: FeedbackAttachmentLevel,
+  knownSessionDir?: string,
 ): Promise<boolean> {
   const api = createFeedbackUploadApi(host);
 
   if (level === 'logs') {
-    const uploaded = await prepareAndUploadSessionArchive(host, api, feedbackId);
+    const uploaded = await prepareAndUploadSessionArchive(host, api, feedbackId, knownSessionDir);
     return !uploaded;
   }
   if (level === 'logs+codebase') {
     const [sessionDir, scan] = await Promise.all([
-      resolveCurrentSessionDir(host),
+      knownSessionDir ?? resolveCurrentSessionDir(host),
       scanCodebaseForFeedback(host.state.appState.workDir),
     ]);
     const [uploadedSession, uploadedCodebase] = await Promise.all([
@@ -132,13 +135,56 @@ async function archiveFromExportedSession(zipPath: string): Promise<FeedbackArch
   };
 }
 
-async function resolveCurrentSessionDir(host: SlashCommandHost): Promise<string | undefined> {
+export async function resolveCurrentSessionDir(host: SlashCommandHost): Promise<string | undefined> {
   try {
     const sessions = await host.harness.listSessions({ workDir: host.state.appState.workDir });
     return sessions.find((session) => session.id === host.state.appState.sessionId)?.sessionDir;
   } catch {
     return undefined;
   }
+}
+
+export async function collectFeedbackRequestInfo(
+  sessionDir: string | undefined,
+  liveRequestIds: readonly string[] | undefined,
+): Promise<{ readonly request_id: string; readonly request_ids: readonly string[] } | undefined> {
+  const seen: string[] = [];
+  const push = (id: unknown): void => {
+    if (typeof id !== 'string') return;
+    const trimmed = id.trim();
+    if (trimmed.length > 0 && !seen.includes(trimmed)) {
+      seen.push(trimmed);
+    }
+  };
+  if (sessionDir !== undefined) {
+    try {
+      const wireText = await readFile(join(sessionDir, 'agents', 'main', 'wire.jsonl'), 'utf8');
+      for (const line of wireText.split('\n')) {
+        if (!line.includes('"requestId"')) continue;
+        try {
+          const record = JSON.parse(line) as {
+            type?: unknown;
+            requestId?: unknown;
+            error?: { details?: { requestId?: unknown } };
+          };
+          if (record.type === 'usage.record' || record.type === 'turn.ended') {
+            push(record.requestId ?? record.error?.details?.requestId);
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {}
+  }
+  for (const id of liveRequestIds ?? []) {
+    push(id);
+  }
+  if (seen.length === 0) return undefined;
+  const requestIds = seen.slice(-MAX_FEEDBACK_REQUEST_IDS);
+  return {
+    request_id: requestIds.at(-1)!,
+    request_ids: requestIds,
+  };
 }
 
 async function scanCodebaseForFeedback(

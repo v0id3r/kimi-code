@@ -83,6 +83,6 @@ export const openAIProtocol = defineProtocol<
   decoder: (module, sink) =>
     createDecoder(sink, module.options?.reasoningKey, module.options?.onReasoningKey),
   replay: (response: RawResponse) => replay(response),
-  requestId: requestIdFromHeader('x-request-id'),
+  requestId: requestIdFromHeader('x-request-id', 'x-trace-id'),
   decodeError,
 });

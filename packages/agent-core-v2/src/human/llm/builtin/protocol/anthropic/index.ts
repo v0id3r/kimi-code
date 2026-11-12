@@ -120,6 +120,6 @@ export const anthropicProtocol = defineProtocol<
   },
   decoder: (_module, sink) => createDecoder(sink),
   replay: (response: RawResponse) => replay(response),
-  requestId: requestIdFromHeader('request-id'),
+  requestId: requestIdFromHeader('request-id', 'x-request-id', 'x-trace-id'),
   decodeError,
 });

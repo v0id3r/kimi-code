@@ -15,6 +15,7 @@ const usageRecordSchema = z.object({
   model: z.string(),
   usage: z.custom<TokenUsage>(),
   usageScope: z.custom<UsageRecordScope>().optional(),
+  requestId: z.string().optional(),
 });
 
 export class UsageRecord extends AgentEvent2<z.infer<typeof usageRecordSchema>> {
@@ -27,6 +28,7 @@ export interface UsageRecord {
   readonly model: string;
   readonly usage: TokenUsage;
   readonly usageScope?: UsageRecordScope;
+  readonly requestId?: string;
 }
 
 export function copyUsage(usage: TokenUsage): TokenUsage {

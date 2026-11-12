@@ -434,13 +434,22 @@ export class AgentTurnProjection {
       case 'turn.ended': {
         const active = this.active;
         const promptOnly = this.promptOnlyTurnIds.has(event.turnId);
+        const failedError =
+          event.outcome.type === 'failed' ? toKimiErrorPayload(event.outcome.error) : undefined;
+        const failedErrorRequestId =
+          typeof failedError?.details?.['requestId'] === 'string' &&
+          failedError.details['requestId'].length > 0
+            ? failedError.details['requestId']
+            : undefined;
         return {
           ...event,
           durationMs: promptOnly ? 0 : active === undefined ? undefined : Date.now() - active.startedAt,
           stopReason: promptOnly ? 'prompt_only' : active?.forcedStopReason ?? active?.lastStopReason ?? undefined,
           requestId: promptOnly || event.outcome.type === 'aborted'
             ? undefined
-            : event.outcome.type === 'done' ? this.lastRequestId : this.activeRequestTrace?.requestId,
+            : event.outcome.type === 'done'
+              ? this.lastRequestId
+              : (failedErrorRequestId ?? this.activeRequestTrace?.requestId),
         };
       }
       default:
@@ -906,8 +915,17 @@ export class AgentTurnProjection {
       else turn.ready.reject(new Error2(ErrorCodes.INTERNAL, 'Turn ended before first step'));
     }
     const durationMs = promptOnly ? 0 : Date.now() - turn.startedAt;
-    const requestId = promptOnly || result.type === 'cancelled' ? undefined : result.type === 'completed' ? this.lastRequestId : this.activeRequestTrace?.requestId;
     const error = result.type === 'failed' ? toKimiErrorPayload(result.error) : undefined;
+    const errorRequestId =
+      typeof error?.details?.['requestId'] === 'string' && error.details['requestId'].length > 0
+        ? error.details['requestId']
+        : undefined;
+    const requestId =
+      promptOnly || result.type === 'cancelled'
+        ? undefined
+        : result.type === 'completed'
+          ? this.lastRequestId
+          : (errorRequestId ?? this.activeRequestTrace?.requestId);
     const interruptReason = result.type === 'completed' ? undefined : interruptReasonFor(result);
     const turnEnded = this.options.dispatcher.dispatch(new TurnEnded({
       agentId: this.options.scopeContext.agentId,

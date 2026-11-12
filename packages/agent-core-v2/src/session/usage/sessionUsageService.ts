@@ -21,10 +21,11 @@ export class SessionUsageService extends Service implements ISessionUsageService
     model: string,
     usage: TokenUsage | undefined,
     source?: AgentLLMRequestSource,
+    requestId?: string,
   ): Promise<void> {
     const recordedUsage = usage ?? emptyUsage();
     const firstRecord = await agentSpaceOf(agent).use(UsageAgentModelDefinition, (m) =>
-      m.record({ model, usage: recordedUsage, source }),
+      m.record({ model, usage: recordedUsage, source, requestId }),
     );
     this.onDidRecordEmitter.fire({
       agent,

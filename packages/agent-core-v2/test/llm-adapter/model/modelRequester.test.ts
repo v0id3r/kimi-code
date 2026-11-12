@@ -556,20 +556,30 @@ describe('buildStreamTiming', () => {
   });
 
   it('adds the blocked share of the decode window when reported', () => {
-    expect(
-      buildStreamTiming(100, 120, 250, 400, {
+      expect(
+        buildStreamTiming(100, 120, 250, 400, {
+          serverDecodeMs: 10,
+          clientConsumeMs: 60,
+          clientBlockedMs: 80,
+        }),
+      ).toEqual({
+        firstTokenLatencyMs: 150,
+        streamDurationMs: 150,
+        requestBuildMs: 20,
+        serverFirstTokenMs: 130,
         serverDecodeMs: 10,
         clientConsumeMs: 60,
         clientBlockedMs: 80,
-      }),
-    ).toEqual({
-      firstTokenLatencyMs: 150,
-      streamDurationMs: 150,
-      requestBuildMs: 20,
-      serverFirstTokenMs: 130,
-      serverDecodeMs: 10,
-      clientConsumeMs: 60,
-      clientBlockedMs: 80,
+      });
     });
+  });
+
+describe('requestIdFromHeader', () => {
+  it('falls back across multiple candidate header names case-insensitively', async () => {
+    const { requestIdFromHeader } = await import('#human/llm/protocol/kit/http');
+    const extract = requestIdFromHeader('request-id', 'x-request-id', 'x-trace-id');
+    expect(extract({ 'X-Request-Id': 'req-123', 'X-Trace-Id': 'trace-456' })).toBe('req-123');
+    expect(extract({ 'x-trace-id': 'trace-456' })).toBe('trace-456');
+    expect(extract({})).toBeUndefined();
   });
 });

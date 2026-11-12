@@ -23,7 +23,11 @@ import {
   withFeedbackVersionPrefix,
 } from '../constant/feedback';
 import { DEFAULT_OAUTH_PROVIDER_NAME, isManagedUsageProvider } from '../constant/kimi-tui';
-import { submitFeedbackWithAttachments } from '../../feedback/feedback-attachments';
+import {
+  collectFeedbackRequestInfo,
+  resolveCurrentSessionDir,
+  submitFeedbackWithAttachments,
+} from '../../feedback/feedback-attachments';
 import { formatErrorMessage } from '../utils/event-payload';
 import { sessionWorkDir } from '../utils/session-work-dir';
 import { openUrl } from '#/utils/open-url';
@@ -82,12 +86,20 @@ export async function handleFeedbackCommand(host: SlashCommandHost): Promise<voi
       'Codebase attachment is not supported for remote sessions — the scanner only reads the local filesystem.',
     );
   }
-  const level = await promptFeedbackAttachment(host, remoteSession);
+  const sessionDir = await resolveCurrentSessionDir(host);
+  const level =
+    sessionDir === undefined
+      ? await promptFeedbackAttachment(host, remoteSession)
+      : await promptFeedbackAttachment(host, remoteSession, sessionDir);
   if (level === undefined) {
     host.showStatus(FEEDBACK_STATUS_CANCELLED);
     return;
   }
 
+  const feedbackInfo = await collectFeedbackRequestInfo(
+    sessionDir,
+    host.state.appState.feedbackRequestIds,
+  );
   const version = withFeedbackVersionPrefix(host.state.appState.version);
   const spinner = host.showLoginProgressSpinner(FEEDBACK_STATUS_SUBMITTING);
   // Guarantee the spinner's underlying setInterval is always cleared, even when
@@ -106,6 +118,7 @@ export async function handleFeedbackCommand(host: SlashCommandHost): Promise<voi
       version,
       os: `${osType()} ${osRelease()}`,
       model: host.state.appState.model.length > 0 ? host.state.appState.model : null,
+      info: feedbackInfo,
     });
 
     if (res.kind !== 'ok') {
@@ -120,7 +133,7 @@ export async function handleFeedbackCommand(host: SlashCommandHost): Promise<voi
     // partial-failure status, never to the GitHub fallback in the outer catch.
     let attachmentFailed = false;
     try {
-      attachmentFailed = await submitFeedbackWithAttachments(host, res.feedbackId, level);
+      attachmentFailed = await submitFeedbackWithAttachments(host, res.feedbackId, level, sessionDir);
     } catch {
       attachmentFailed = true;
     }

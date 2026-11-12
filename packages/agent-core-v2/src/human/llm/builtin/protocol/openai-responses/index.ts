@@ -75,6 +75,6 @@ export const openAIResponsesProtocol = defineProtocol<
   },
   decoder: (_module, sink) => createDecoder(sink),
   replay: (response: RawResponse) => replay(response),
-  requestId: requestIdFromHeader('x-request-id'),
+  requestId: requestIdFromHeader('x-request-id', 'x-trace-id'),
   decodeError,
 });

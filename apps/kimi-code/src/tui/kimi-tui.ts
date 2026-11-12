@@ -2391,6 +2391,12 @@ export class KimiTUI {
   }
 
   handleTurnEnded(event: TurnEndedEvent): void {
+    if (event.requestId !== undefined && event.requestId.length > 0) {
+      const existing = this.state.appState.feedbackRequestIds ?? [];
+      if (!existing.includes(event.requestId)) {
+        this.state.appState.feedbackRequestIds = [...existing, event.requestId];
+      }
+    }
     this.staging.handleTurnEnded(event);
     this.surveyController.notifyTurnEnded(event.requestId);
     this.programStatus.finishTurn(event);
@@ -3786,6 +3792,7 @@ export class KimiTUI {
     this.cacheHint.resetRuntime();
     this.promptPredictionController.reset();
     this.surveyController.reset();
+    this.state.appState.feedbackRequestIds = undefined;
     this.streamingUI.discardPending();
     this.resetSteerDeliveries();
     // The lazy first creation keeps input queued while it was in flight (the

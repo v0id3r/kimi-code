@@ -294,17 +294,24 @@ export class AgentLoopRequestObserver {
       this.trackCacheBreak(measured, recorded.messages);
       this.states.set(llmRequesterLastMeasuredRequestKey, measured);
     }
-    void this.usage.record(this.scopeContext.agentContext, request.modelAlias, usage, request.source);
+    void this.usage.record(
+      this.scopeContext.agentContext,
+      request.modelAlias,
+      usage,
+      request.source,
+      outcome.requestId,
+    );
     if (usage !== undefined) {
       this.tokenCounting.measured(this.scopeContext.agentContext, request.messages, [message], usage);
     }
-    this.logResponse(request.logFields, usage ?? emptyUsage(), timing);
+    this.logResponse(request.logFields, usage ?? emptyUsage(), timing, outcome.requestId);
   }
 
   failRequest(observation: AgentRequestObservation, error: unknown, signal: AbortSignal): void {
+    const previousRequestId = observation.currentRequestId;
     if (!isAbortError(error) && !signal.aborted) {
-      this.logRequestFailure(observation, error);
-      this.trackApiError(observation, error);
+      this.logRequestFailure(observation, error, previousRequestId);
+      this.trackApiError(observation, error, previousRequestId);
     }
     observation.setRequestId(undefined);
   }
@@ -398,6 +405,7 @@ export class AgentLoopRequestObserver {
     fields: AgentLLMRequestLogFields | undefined,
     usage: TokenUsage,
     timing: ModelRequestTiming | undefined,
+    requestId: string | undefined,
   ): void {
     if (timing === undefined) return;
     const payload: LogContext = {
@@ -406,6 +414,7 @@ export class AgentLoopRequestObserver {
       streamDurationMs: timing.streamDurationMs,
       outputTokens: usage.output,
     };
+    if (requestId !== undefined) payload['requestId'] = requestId;
     if (timing.requestBuildMs !== undefined) payload['requestBuildMs'] = timing.requestBuildMs;
     if (timing.serverFirstTokenMs !== undefined) payload['serverFirstTokenMs'] = timing.serverFirstTokenMs;
     if (timing.serverDecodeMs !== undefined) payload['serverDecodeMs'] = timing.serverDecodeMs;
@@ -414,17 +423,28 @@ export class AgentLoopRequestObserver {
     this.log.info('llm response', payload);
   }
 
-  private logRequestFailure(observation: AgentRequestObservation, error: unknown): void {
+  private logRequestFailure(
+    observation: AgentRequestObservation,
+    error: unknown,
+    previousRequestId: string | undefined,
+  ): void {
     const modelAlias = observation.context?.modelAlias ?? observation.config.resolved.modelAlias;
-    this.log.warn('llm request failed', {
+    const requestId = apiRequestId(error) ?? previousRequestId;
+    const payload: LogContext = {
       ...agentLLMRequestLogFields(observation.source),
       model: modelAlias,
       ...retryErrorFields(error),
       diagnostics: errorDiagnostics(error),
-    });
+    };
+    if (requestId !== undefined) payload['requestId'] = requestId;
+    this.log.warn('llm request failed', payload);
   }
 
-  private trackApiError(observation: AgentRequestObservation, error: unknown): void {
+  private trackApiError(
+    observation: AgentRequestObservation,
+    error: unknown,
+    previousRequestId: string | undefined,
+  ): void {
     const model = observation.context?.model;
     const modelAlias = observation.context?.modelAlias ?? observation.config.resolved.modelAlias;
     const source = observation.source;
@@ -439,7 +459,7 @@ export class AgentLoopRequestObserver {
       duration_ms: Math.max(0, Date.now() - observation.startedAt),
       turn_id: source.turnId,
       request_kind: requestKindForTelemetry(source),
-      request_id: apiRequestId(error),
+      request_id: apiRequestId(error) ?? previousRequestId,
     };
     if (source.type === 'turn' && source.step !== undefined) properties['step_no'] = source.step;
     const statusCode = apiStatusCode(error);
@@ -546,6 +566,10 @@ export class AgentRequestObservation {
   prepare(context: ResolvedRequestContext, request: CoreLlmRequest): void {
     this.context = context;
     this.request = request;
+  }
+
+  get currentRequestId(): string | undefined {
+    return this.trace.requestId;
   }
 
   setRequestId(requestId: string | null | undefined): void {

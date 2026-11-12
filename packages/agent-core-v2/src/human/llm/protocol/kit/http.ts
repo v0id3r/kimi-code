@@ -18,9 +18,15 @@ export function headersToRecord(headers: unknown): Record<string, string> | null
 }
 
 export function requestIdFromHeader(
-  name: string,
+  ...names: readonly string[]
 ): (headers: Readonly<Record<string, string>>) => string | undefined {
-  return (headers) => headerValue(headers, name);
+  return (headers) => {
+    for (const name of names) {
+      const value = headerValue(headers, name);
+      if (value !== undefined) return value;
+    }
+    return undefined;
+  };
 }
 
 export function parseRetryAfterMs(headers: unknown): number | null {

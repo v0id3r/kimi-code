@@ -144,15 +144,16 @@ function withKimiErrors(base: {
       : (classifyKimiQuotaError(error) ?? base.decodeError(error, source));
 }
 
+const kimiRequestId = requestIdFromHeader('x-trace-id', 'x-msh-request-id', 'x-request-id');
+
 function diagnoseKimiError({ error, headers }: LlmErrorDiagnosticsInput) {
   const currentHeaders = headers ?? llmStatusErrorMessage(error)?.headers ?? undefined;
-  const requestId =
-    currentHeaders === undefined ? undefined : requestIdFromHeader('x-trace-id')(currentHeaders);
+  const requestId = currentHeaders === undefined ? undefined : kimiRequestId(currentHeaders);
   return requestId === undefined ? {} : { requestId };
 }
 
 export const kimiOpenAIProtocol = openAIProtocol.with((base) => ({
-  requestId: requestIdFromHeader('x-trace-id'),
+  requestId: kimiRequestId,
   diagnoseError: diagnoseKimiError,
   legality: {
     ...openAIModelLegality,
@@ -190,7 +191,7 @@ export const kimiOpenAIProtocol = openAIProtocol.with((base) => ({
 }));
 
 export const kimiAnthropicProtocol = anthropicProtocol.with((base) => ({
-  requestId: requestIdFromHeader('x-trace-id'),
+  requestId: kimiRequestId,
   diagnoseError: diagnoseKimiError,
   thinking: (thinking) =>
     thinking === undefined
@@ -207,7 +208,7 @@ export const kimiAnthropicProtocol = anthropicProtocol.with((base) => ({
 }));
 
 export const kimiResponsesProtocol = openAIResponsesProtocol.with((base) => ({
-  requestId: requestIdFromHeader('x-trace-id'),
+  requestId: kimiRequestId,
   diagnoseError: diagnoseKimiError,
   legality: {
     ...openAIResponsesModelLegality,

@@ -991,6 +991,7 @@ interface UsageRecordPayload {
   usage: TokenUsage;
   /** UsageRecordScope */
   usageScope?: 'session' | 'turn' | 'prediction';
+  requestId?: string;
 }
 
 /** Record type → payload sketch. */

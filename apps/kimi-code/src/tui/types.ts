@@ -113,6 +113,7 @@ export interface AppState {
    * unsynced — every consumer must treat that as the plain local session.
    */
   environment?: EnvironmentSlotState;
+  feedbackRequestIds?: string[];
 }
 
 export function sumTokenUsage(total: TokenUsage): number | undefined {

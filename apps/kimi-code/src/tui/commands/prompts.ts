@@ -74,27 +74,40 @@ export function promptFeedbackInput(host: SlashCommandHost): Promise<FeedbackPro
   });
 }
 
-export type FeedbackAttachmentLevel = 'none' | 'logs' | 'logs+codebase';
+export type FeedbackAttachmentLevel = 'logs' | 'logs+codebase';
 
 const FEEDBACK_ATTACHMENT_OPTIONS: readonly ChoiceOption[] = [
-  { value: 'none', label: 'No attachment', description: 'Text feedback only' },
   {
     value: 'logs',
     label: 'Logs only',
-    description: 'Upload wire events and diagnostic logs from this session',
+    description:
+      'Upload session.zip (full conversation history in wire.jsonl, tool calls/results, session attachments, and diagnostic logs)',
   },
   {
     value: 'logs+codebase',
     label: 'Logs + codebase',
     description:
-      'Include your codebase for deeper diagnosis. Sensitive files are automatically excluded — e.g. .env, config files, secret keys. We use attachments only for diagnosis and never share them.',
+      'Also upload repo.zip from this workspace (excludes .git, node_modules, build outputs, .env*, private keys, and credential dirs). Attachments are used only for diagnosis and never shared.',
     descriptionTone: 'warning',
   },
 ];
 
+function buildFeedbackDisclosureMarkdown(sessionDir?: string): string {
+  const lines = [
+    'The following data will be submitted for troubleshooting:',
+    '- Feedback note and metadata (`session_id`, `request_id`, active model, CLI version, OS, shell)',
+    '- `session.zip`: conversation history (`wire.jsonl`), tool calls/results, session attachments, `logs/kimi-code.log`, and `logs/global/kimi-code.log`',
+  ];
+  if (sessionDir !== undefined && sessionDir.length > 0) {
+    lines.push(`- Local session directory: \`${sessionDir}\``);
+  }
+  return lines.join('\n');
+}
+
 export function promptFeedbackAttachment(
   host: SlashCommandHost,
   excludeCodebase = false,
+  sessionDir?: string,
 ): Promise<FeedbackAttachmentLevel | undefined> {
   const options = excludeCodebase
     ? FEEDBACK_ATTACHMENT_OPTIONS.filter((option) => option.value !== 'logs+codebase')
@@ -102,6 +115,7 @@ export function promptFeedbackAttachment(
   return new Promise((resolve) => {
     const picker = new ChoicePickerComponent({
       title: 'Share diagnostic info to help us investigate?',
+      notice: { markdown: buildFeedbackDisclosureMarkdown(sessionDir) },
       options,
       onSelect: (value) => {
         host.restoreEditor();

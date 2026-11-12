@@ -1,7 +1,8 @@
-import { visibleWidth } from '@moonshot-ai/pi-tui';
+import { visibleWidth, type Component } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { promptFeedbackAttachment } from '#/tui/commands/prompts';
 import {
   FeedbackInputDialogComponent,
   type FeedbackInputDialogResult,
@@ -115,5 +116,50 @@ describe('FeedbackInputDialogComponent', () => {
     dialog.handleInput('\r');
     dialog.handleInput(ESC);
     expect(collected).toEqual([{ kind: 'ok', value: 'hi' }]);
+  });
+});
+
+describe('promptFeedbackAttachment', () => {
+  it('omits No attachment and discloses submitted metadata, archives, and local session directory', () => {
+    let mounted: Component | undefined;
+    const host = {
+      mountEditorReplacement: (component: Component) => {
+        mounted = component;
+      },
+      restoreEditor: vi.fn(),
+    };
+
+    void promptFeedbackAttachment(host as never, false, '/tmp/sessions/ses-42');
+    expect(mounted).toBeDefined();
+    const rendered = strip(mounted!.render(100).join('\n'));
+
+    expect(rendered).not.toContain('No attachment');
+    expect(rendered).toContain('Logs only');
+    expect(rendered).toContain('Logs + codebase');
+    expect(rendered).toContain('The following data will be submitted for troubleshooting:');
+    expect(rendered).toContain('session_id');
+    expect(rendered).toContain('request_id');
+    expect(rendered).toContain('session.zip');
+    expect(rendered).toContain('wire.jsonl');
+    expect(rendered).toContain('logs/global/kimi-code.log');
+    expect(rendered).toContain('/tmp/sessions/ses-42');
+  });
+
+  it('offers only Logs only on remote sessions', () => {
+    let mounted: Component | undefined;
+    const host = {
+      mountEditorReplacement: (component: Component) => {
+        mounted = component;
+      },
+      restoreEditor: vi.fn(),
+    };
+
+    void promptFeedbackAttachment(host as never, true);
+    expect(mounted).toBeDefined();
+    const rendered = strip(mounted!.render(100).join('\n'));
+
+    expect(rendered).not.toContain('No attachment');
+    expect(rendered).toContain('Logs only');
+    expect(rendered).not.toContain('Logs + codebase');
   });
 });

@@ -13,6 +13,7 @@ export interface ISessionUsageService {
     model: string,
     usage: TokenUsage | undefined,
     source?: AgentLLMRequestSource,
+    requestId?: string,
   ): Promise<void>;
   status(agent: AgentContext): UsageStatus;
 

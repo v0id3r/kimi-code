@@ -880,6 +880,7 @@ describe('Agent loop', () => {
           },
         },
       });
+      expect((ended?.args as TurnEnded).requestId).toBe('req-final-503');
       expect((ended?.args as TurnEnded).error?.details).toEqual({
         statusCode: 503,
         requestId: 'req-final-503',
