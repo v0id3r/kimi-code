@@ -114,7 +114,7 @@ export function effectiveModelConfig(
     effective.maxInputSize !== undefined &&
     effective.maxContextSize !== undefined &&
     effective.maxInputSize > effective.maxContextSize
-      ? { ...effective, maxContextSize: effective.maxInputSize }
+      ? { ...effective, maxInputSize: effective.maxContextSize }
       : effective;
   return withAnthropicProfile(clamped, providerType);
 }
