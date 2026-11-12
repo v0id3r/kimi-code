@@ -642,7 +642,32 @@ function apiStatusCode(error: unknown): number | undefined {
 }
 
 function apiRequestId(error: unknown): string | undefined {
-  const diagnostics = errorDiagnostics(error) ?? errorDiagnostics(unwrapErrorCause(error));
-  const requestId = diagnostics?.['requestId'];
-  return typeof requestId === 'string' ? requestId : undefined;
+  const raw = unwrapErrorCause(error);
+  const diagnostics = errorDiagnostics(error) ?? errorDiagnostics(raw);
+  const fromDiagnostics = nonEmptyRequestId(diagnostics?.['requestId']);
+  if (fromDiagnostics !== undefined) return fromDiagnostics;
+  if (raw instanceof APIStatusError) {
+    const direct = nonEmptyRequestId(raw.requestId);
+    if (direct !== undefined) return direct;
+  }
+  if (typeof raw === 'object' && raw !== null) {
+    const direct = nonEmptyRequestId((raw as Record<string, unknown>)['requestId']);
+    if (direct !== undefined) return direct;
+  }
+  for (const candidate of [error, raw]) {
+    if (typeof candidate === 'object' && candidate !== null) {
+      const details = (candidate as Record<string, unknown>)['details'];
+      if (typeof details === 'object' && details !== null) {
+        const fromDetails = nonEmptyRequestId((details as Record<string, unknown>)['requestId']);
+        if (fromDetails !== undefined) return fromDetails;
+      }
+    }
+  }
+  return undefined;
+}
+
+function nonEmptyRequestId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }

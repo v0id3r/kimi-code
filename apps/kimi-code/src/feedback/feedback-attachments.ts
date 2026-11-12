@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, rm, stat, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import { Readable } from 'node:stream';
+import { finished } from 'node:stream/promises';
 
 import { detectInstallSource } from '#/cli/update/source';
+import { MAX_FEEDBACK_REQUEST_IDS } from '#/constant/app';
 import type { SlashCommandHost } from '#/tui/commands/dispatch';
 import type { FeedbackAttachmentLevel } from '#/tui/commands/prompts';
 import { getLogDir } from '#/utils/paths';
@@ -27,8 +31,6 @@ const CODEBASE_SCAN_TIMEOUT_MS = 3000;
  * Returns `true` when at least one requested attachment failed so the caller
  * can surface a partial-failure status.
  */
-const MAX_FEEDBACK_REQUEST_IDS = 50;
-
 export async function submitFeedbackWithAttachments(
   host: SlashCommandHost,
   feedbackId: number,
@@ -148,43 +150,71 @@ export async function collectFeedbackRequestInfo(
   sessionDir: string | undefined,
   liveRequestIds: readonly string[] | undefined,
 ): Promise<{ readonly request_id: string; readonly request_ids: readonly string[] } | undefined> {
-  const seen: string[] = [];
+  const seen = new Set<string>();
+  const requestIds: string[] = [];
   const push = (id: unknown): void => {
     if (typeof id !== 'string') return;
     const trimmed = id.trim();
-    if (trimmed.length > 0 && !seen.includes(trimmed)) {
-      seen.push(trimmed);
-    }
+    if (trimmed.length === 0 || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    if (requestIds.length >= MAX_FEEDBACK_REQUEST_IDS) requestIds.shift();
+    requestIds.push(trimmed);
   };
   if (sessionDir !== undefined) {
-    try {
-      const wireText = await readFile(join(sessionDir, 'agents', 'main', 'wire.jsonl'), 'utf8');
-      for (const line of wireText.split('\n')) {
-        if (!line.includes('"requestId"')) continue;
-        try {
-          const record = JSON.parse(line) as {
-            type?: unknown;
-            requestId?: unknown;
-            error?: { details?: { requestId?: unknown } };
-          };
-          if (record.type === 'usage.record' || record.type === 'turn.ended') {
-            push(record.requestId ?? record.error?.details?.requestId);
-          }
-        } catch {
-          continue;
-        }
-      }
-    } catch {}
+    await scanPersistedWireRequestIds(join(sessionDir, 'agents', 'main', 'wire.jsonl'), push);
   }
   for (const id of liveRequestIds ?? []) {
     push(id);
   }
-  if (seen.length === 0) return undefined;
-  const requestIds = seen.slice(-MAX_FEEDBACK_REQUEST_IDS);
+  if (requestIds.length === 0) return undefined;
   return {
     request_id: requestIds.at(-1)!,
     request_ids: requestIds,
   };
+}
+
+async function scanPersistedWireRequestIds(
+  wirePath: string,
+  push: (id: unknown) => void,
+): Promise<void> {
+  let file: FileHandle;
+  try {
+    file = await open(wirePath, 'r');
+  } catch {
+    return;
+  }
+  let input: Readable | undefined;
+  try {
+    const size = (await file.stat()).size;
+    if (size === 0) return;
+    input = file.createReadStream({
+      encoding: 'utf8',
+      autoClose: false,
+      end: size - 1,
+    });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    for await (const line of lines) {
+      if (!line.includes('"requestId"')) continue;
+      try {
+        const record = JSON.parse(line) as {
+          type?: unknown;
+          requestId?: unknown;
+          error?: { details?: { requestId?: unknown } };
+        };
+        if (record.type === 'usage.record' || record.type === 'turn.ended') {
+          push(record.requestId ?? record.error?.details?.requestId);
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return;
+  } finally {
+    input?.destroy();
+    if (input !== undefined) await finished(input, { cleanup: true }).catch(() => {});
+    await file.close().catch(() => {});
+  }
 }
 
 async function scanCodebaseForFeedback(

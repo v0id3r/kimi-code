@@ -81,13 +81,13 @@ const FEEDBACK_ATTACHMENT_OPTIONS: readonly ChoiceOption[] = [
     value: 'logs',
     label: 'Logs only',
     description:
-      'Upload session.zip (full conversation history in wire.jsonl, tool calls/results, session attachments, and diagnostic logs)',
+      'Upload session.zip (session directory files including wire.jsonl, state.json, attachments, plan/task outputs, and manifest.json, excluding file-history snapshots; plus session and global logs)',
   },
   {
     value: 'logs+codebase',
     label: 'Logs + codebase',
     description:
-      'Also upload repo.zip from this workspace (excludes .git, node_modules, build outputs, .env*, private keys, and credential dirs). Attachments are used only for diagnosis and never shared.',
+      'Also upload repo.zip from this workspace (excludes .git, node_modules, build outputs, .env files except .example/.sample/.template, private keys, and credential files/dirs). Attachments are used only for diagnosis and never shared.',
     descriptionTone: 'warning',
   },
 ];
@@ -96,7 +96,7 @@ function buildFeedbackDisclosureMarkdown(sessionDir?: string): string {
   const lines = [
     'The following data will be submitted for troubleshooting:',
     '- Feedback note and metadata (`session_id`, `request_id`, active model, CLI version, OS, shell)',
-    '- `session.zip`: conversation history (`wire.jsonl`), tool calls/results, session attachments, `logs/kimi-code.log`, and `logs/global/kimi-code.log`',
+    '- `session.zip`: session directory contents (`wire.jsonl` conversation and tool results, `state.json`, session attachments, plan/task artifacts, `logs/kimi-code.log`, and `manifest.json`, excluding `file-history` snapshots) plus `logs/global/kimi-code.log`',
   ];
   if (sessionDir !== undefined && sessionDir.length > 0) {
     lines.push(`- Local session directory: \`${sessionDir}\``);

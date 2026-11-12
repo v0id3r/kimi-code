@@ -1723,6 +1723,33 @@ describe('AgentLoopRequestFactory request id', () => {
     expect(request.trace.requestId).toBeUndefined();
   });
 
+  it('falls back to APIStatusError.requestId on non-streaming status failures without diagnostics.requestId', async () => {
+    const requester = createTracedRequester(null);
+    Object.defineProperty(requester, 'request', {
+      value: async function* () {
+        const events: ModelRequestEvent[] = [];
+        for (const event of events) yield event;
+        throw new APIStatusError(429, 'rate limited', false, 'req-status-429', null, {
+          statusCode: 429,
+        });
+      },
+    });
+    const { service, telemetryRecords } = createService(requester);
+    const request = startRequest(service, { source: { type: 'turn', turnId: 5, step: 1 } });
+    await expect(request.result).rejects.toMatchObject({ statusCode: 429 });
+
+    expect(telemetryRecords).toContainEqual({
+      event: 'api_error',
+      properties: expect.objectContaining({
+        error_type: 'rate_limit',
+        request_id: 'req-status-429',
+        turn_id: 5,
+        step_no: 1,
+      }),
+    });
+    expect(request.trace.requestId).toBeUndefined();
+  });
+
   it('uses protocol diagnostics instead of retaining the header request id on failure', async () => {
     const requester = createTracedRequester(null);
     Object.defineProperty(requester, 'request', {

@@ -141,7 +141,11 @@ describe('promptFeedbackAttachment', () => {
     expect(rendered).toContain('request_id');
     expect(rendered).toContain('session.zip');
     expect(rendered).toContain('wire.jsonl');
+    expect(rendered).toContain('state.json');
+    expect(rendered).toContain('manifest.json');
+    expect(rendered).toContain('file-history');
     expect(rendered).toContain('logs/global/kimi-code.log');
+    expect(rendered).toContain('.example/.sample/.template');
     expect(rendered).toContain('/tmp/sessions/ses-42');
   });
 

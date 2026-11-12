@@ -40,6 +40,7 @@ import {
 import { resolve } from 'pathe';
 
 import type { CLIOptions } from '#/cli/options';
+import { MAX_FEEDBACK_REQUEST_IDS } from '#/constant/app';
 import { MigrationScreenComponent, type MigrationScreenResult } from '#/migration/index';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
 import { appendInputHistory, inputHistoryEntryEquals, loadInputHistory, type InputHistoryEntry } from '#/utils/history/input-history';
@@ -2394,7 +2395,9 @@ export class KimiTUI {
     if (event.requestId !== undefined && event.requestId.length > 0) {
       const existing = this.state.appState.feedbackRequestIds ?? [];
       if (!existing.includes(event.requestId)) {
-        this.state.appState.feedbackRequestIds = [...existing, event.requestId];
+        this.state.appState.feedbackRequestIds = [...existing, event.requestId].slice(
+          -MAX_FEEDBACK_REQUEST_IDS,
+        );
       }
     }
     this.staging.handleTurnEnded(event);

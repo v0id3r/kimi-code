@@ -3574,6 +3574,52 @@ command = "vim"
     }
   });
 
+  it('caps feedback request_ids at the latest 50 unique entries without reviving evicted ids', async () => {
+    const session = makeSession();
+    const { driver, harness } = await makeDriver(session);
+    const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-feedback-cap-'));
+    try {
+      await mkdir(join(sessionDir, 'agents', 'main'), { recursive: true });
+      const lines = Array.from({ length: 55 }, (_, i) =>
+        JSON.stringify({
+          type: 'usage.record',
+          agentId: 'main',
+          model: 'k2',
+          usage: { inputOther: 1, output: 1 },
+          requestId: `req-${String(i + 1)}`,
+        }),
+      );
+      await writeFile(join(sessionDir, 'agents', 'main', 'wire.jsonl'), `${lines.join('\n')}\n`, 'utf8');
+      driver.state.appState.feedbackRequestIds = ['req-1', 'req-55', 'req-56'];
+      harness.listSessions.mockResolvedValueOnce([{ id: 'ses-1', sessionDir }] as never);
+      const zipPath = await makeExportedSessionZip();
+      harness.exportSession.mockResolvedValueOnce({
+        zipPath,
+        entries: ['manifest.json'],
+        sessionDir,
+        manifest: {},
+      });
+      vi.mocked(promptFeedbackInput).mockImplementation(async () => ({ value: 'long session' }));
+      vi.mocked(promptFeedbackAttachment).mockImplementation(async () => 'logs');
+      harness.auth.submitFeedback.mockResolvedValueOnce({ kind: 'ok', feedbackId: 22 });
+
+      const feedbackDriver = driver as unknown as FeedbackDriver;
+      await handleFeedbackCommand(feedbackDriver as any);
+
+      const expectedIds = Array.from({ length: 50 }, (_, i) => `req-${String(i + 7)}`);
+      expect(harness.auth.submitFeedback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          info: {
+            request_id: 'req-56',
+            request_ids: expectedIds,
+          },
+        }),
+      );
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
   it('tracks blocked slash commands as invalid without counting them as executed commands', async () => {
     const { driver, harness } = await makeDriver();
     driver.state.appState.streamingPhase = 'waiting';

@@ -92,6 +92,7 @@ export const FEEDBACK_VERSION_PREFIX = 'kimi-code-';
 
 // Telemetry event name; keep stable for dashboard queries.
 export const FEEDBACK_TELEMETRY_EVENT = 'feedback_submitted';
+export const MAX_FEEDBACK_REQUEST_IDS = 50;
 
 // CDN source of truth: all version checks and native install scripts pull from here.
 // The off-session endpoints derive from the current region profile so a
