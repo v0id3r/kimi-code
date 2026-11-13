@@ -1,0 +1,41 @@
+name: Jaz Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: 'Native bundle run id whose artifacts become release assets'
+        required: true
+        type: string
+      version:
+        description: 'Release version, e.g. 2.6.1-jaz.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [darwin-arm64, darwin-x64, linux-arm64, linux-x64]
+    steps:
+      - name: Download bundle artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: kimi-code-native-${{ matrix.platform }}
+          path: bundle
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          asset=$(find bundle -name 'kimi-code-*.zip' | head -1)
+          [ -n "$asset" ] || { echo "no bundle zip in artifact"; exit 1; }
+          gh release view "v$VERSION" >/dev/null 2>&1 || gh release create "v$VERSION" --title "Kimi Code $VERSION" --notes "Kimi Code $VERSION - Jaz fork build (unsigned)."
+          gh release upload "v$VERSION" "$asset#kimi-code-${{ matrix.platform }}.zip" --clobber
