@@ -33,6 +33,7 @@ jobs:
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
         run: |
           asset=$(find bundle -name 'kimi-code-*.zip' | head -1)
