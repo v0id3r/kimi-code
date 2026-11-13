@@ -101,11 +101,59 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     // size (8192, see fakeModelConfig); `cost` stays omitted.
     const usage = await c.waitForSessionUpdate('usage_update', 10_000);
     const usageUpdate = (
-      usage.params as { update?: { used?: number; size?: number; cost?: unknown } }
+      usage.params as {
+        update?: {
+          used?: number;
+          size?: number;
+          cost?: unknown;
+          _meta?: { usage?: Record<string, number> };
+        };
+      }
     ).update;
     expect(usageUpdate?.size).toBe(8192);
     expect(usageUpdate?.used).toBeGreaterThan(0);
     expect(usageUpdate?.cost).toBeUndefined();
+    // The scripted provider reports output-only usage (one text part), so the
+    // _meta.usage extension mirrors it with inclusive input totals.
+    expect(usageUpdate?._meta?.usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 1,
+      totalTokens: 1,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    });
+  }, 30_000);
+
+  it('maps the engine token usage onto usage_update _meta.usage (OpenAI/Codex fields)', async () => {
+    const c = await boot();
+    scripted!.mockNextTextWithUsage('token report', {
+      inputOther: 11,
+      output: 5,
+      inputCacheRead: 30,
+      inputCacheCreation: 7,
+    });
+
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    const prompt = await c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'report usage' }],
+    });
+    expect((prompt as { stopReason: string }).stopReason).toBe('end_turn');
+
+    const usage = await c.waitForSessionUpdate('usage_update', 10_000);
+    const tokens = (
+      usage.params as { update?: { _meta?: { usage?: Record<string, number> } } }
+    ).update?._meta?.usage;
+    expect(tokens).toEqual({
+      inputTokens: 48,
+      outputTokens: 5,
+      totalTokens: 53,
+      cacheReadInputTokens: 30,
+      cacheCreationInputTokens: 7,
+    });
   }, 30_000);
 
   it('runs a tool call and bridges the approval request to the client', async () => {

@@ -30,7 +30,11 @@ import type {
   ToolCallLocation,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
-import type { ContextMessage } from '@moonshot-ai/agent-core-v2';
+import {
+  grandTotal,
+  type ContextMessage,
+  type TokenUsage,
+} from '@moonshot-ai/agent-core-v2';
 import { toCoreMessage } from '@moonshot-ai/agent-core-v2/human/message';
 import { toLlmMessage } from '@moonshot-ai/agent-core-v2/llm-adapter/contract/message';
 import type {
@@ -80,6 +84,7 @@ import {
   toolResultToSessionUpdate,
   turnEndReasonToStopReason,
   usageUpdateNotification,
+  type AcpUsageTokens,
   isAuthError,
   stringifyArgs,
 } from './events-map';
@@ -961,7 +966,9 @@ export class AcpSession {
    * current context token count, `size` = the bound model's max context size
    * from the catalog. Skipped while no catalog model matches the bound id —
    * there is nothing honest to report. `cost` stays omitted (the engine has
-   * no cost data).
+   * no cost data). Recorded token totals ride `_meta.usage` (OpenAI/Codex
+   * vocabulary) when the engine has any; a getUsage failure or an all-zero
+   * tally falls back to the plain {used, size} shape.
    */
   private async emitUsageUpdate(): Promise<void> {
     try {
@@ -970,7 +977,9 @@ export class AcpSession {
       )?.max_context_size;
       if (size === undefined) return;
       const context = await this.agent.getContext();
-      this.emit(usageUpdateNotification(this.sessionId, context.tokenCount, size));
+      this.emit(
+        usageUpdateNotification(this.sessionId, context.tokenCount, size, await this.tokenUsage()),
+      );
     } catch (error) {
       log.warn('acp: failed to push usage_update', {
         sessionId: this.sessionId,
@@ -979,6 +988,35 @@ export class AcpSession {
     }
   }
 
+  /**
+   * Token totals for the `usage_update` `_meta.usage` extension: the session's
+   * cumulative `total` usage (falling back to the current turn's), mapped to
+   * the OpenAI/Codex field names the host parses. Returns undefined when the
+   * engine recorded no tokens at all (or getUsage failed) so the notification
+   * stays in its legacy {used, size} shape.
+   */
+  private async tokenUsage(): Promise<AcpUsageTokens | undefined> {
+    let usage: TokenUsage | undefined;
+    try {
+      const status = await this.agent.getUsage();
+      usage = status.total ?? status.currentTurn;
+    } catch {
+      return undefined;
+    }
+    if (usage === undefined) return undefined;
+    const input = usage.inputOther + (usage.inputCacheRead ?? 0) + usage.inputCacheCreation;
+    const output = usage.output;
+    if (input === 0 && output === 0) return undefined;
+    return {
+      inputTokens: input,
+      outputTokens: output,
+      totalTokens: grandTotal(usage) ?? input + output,
+      ...(usage.inputCacheRead === undefined
+        ? {}
+        : { cacheReadInputTokens: usage.inputCacheRead }),
+      cacheCreationInputTokens: usage.inputCacheCreation,
+    };
+  }
   private onMetadataChanged(event: SessionEventPayloads['metadata.changed']): void {
     if (!event.changed.includes('title')) return;
     void this.emitSessionInfoUpdate();

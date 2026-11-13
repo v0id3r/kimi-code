@@ -36,6 +36,7 @@ interface ScriptedResponse {
   readonly parts: readonly StreamedMessagePart[];
   readonly finishReason?: FinishReason | null;
   readonly rawFinishReason?: string | null;
+  readonly usage?: TokenUsage;
 }
 
 const ZERO_USAGE: TokenUsage = {
@@ -69,7 +70,7 @@ class ScriptedStream {
     }
     const hasToolCall = this.parts.some((p) => p.type === 'function');
     this.id = `scripted-${String(this.index)}`;
-    this.usage = { ...ZERO_USAGE, output: this.parts.length };
+    this.usage = this.response.usage ?? { ...ZERO_USAGE, output: this.parts.length };
     this.finishReason =
       this.response.finishReason ?? (hasToolCall ? 'tool_calls' : 'completed');
     this.rawFinishReason =
@@ -119,6 +120,8 @@ export interface ScriptedProvider {
   readonly seed: readonly [typeof IProtocolAdapterRegistry, IProtocolAdapterRegistryType];
   /** Push a text-only assistant response onto the queue. */
   mockNextText(text: string): void;
+  /** Push a text-only response with an explicit provider usage report. */
+  mockNextTextWithUsage(text: string, usage: TokenUsage): void;
   /** Push a response assembled from arbitrary streamed parts. */
   mockNextResponse(...parts: StreamedMessagePart[]): void;
   /** Push a response with an explicit finish reason. */
@@ -200,6 +203,9 @@ export function createScriptedProvider(): ScriptedProvider {
     seed: [IProtocolAdapterRegistry, registry],
     mockNextText: (text) => {
       queue.push({ parts: [{ type: 'text', text }] });
+    },
+    mockNextTextWithUsage: (text, usage) => {
+      queue.push({ parts: [{ type: 'text', text }], usage });
     },
     mockNextResponse: (...parts) => {
       queue.push({ parts: structuredClone(parts) });
