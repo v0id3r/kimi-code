@@ -145,19 +145,18 @@ describe('promptFeedbackAttachment', () => {
     const rendered = strip(mounted!.render(100).join('\n'));
 
     expect(rendered).not.toContain('No attachment');
-    expect(rendered).toContain('Logs only');
-    expect(rendered).toContain('Logs + codebase');
-    expect(rendered).toContain('The following data will be submitted for troubleshooting:');
-    expect(rendered).toContain('session_id');
-    expect(rendered).toContain('request_id');
-    expect(rendered).toContain('session.zip');
-    expect(rendered).toContain('ses-42/agents/main/wire.jsonl');
-    expect(rendered).toContain('ses-42/state.json');
-    expect(rendered).toContain('manifest.json');
-    expect(rendered).toContain('file-history');
-    expect(rendered).toContain('global/kimi-code.log');
-    expect(rendered).toContain('.example/.sample/.template');
-    expect(rendered).toContain('/tmp/sessions/ses-42');
+    expect(rendered).toContain('Current session logs');
+    expect(rendered).toContain('Session logs + project code');
+    expect(rendered).toContain('Choose what to include with your feedback');
+    expect(rendered).toContain('session ID, request IDs, model, CLI version, OS, and shell');
+    expect(rendered).toContain('5 files in session.zip · showing 1–4 of 4 session files');
+    expect(rendered).toContain('  agents/main/wire.jsonl');
+    expect(rendered).toContain('  state.json');
+    expect(rendered).toContain('  manifest.json');
+    expect(rendered).toContain('logs/global/kimi-code.log');
+    expect(rendered).toContain('Secrets, dependencies,');
+    expect(rendered).toContain('and build outputs are excluded.');
+    expect(rendered).toContain('Current session · ses-42');
   });
 
   it('expands and pages through every current-session file', () => {
@@ -181,16 +180,25 @@ describe('promptFeedbackAttachment', () => {
     expect(mounted).toBeDefined();
     const dialog = mounted as Component & Focusable & { handleInput: (data: string) => void };
     const collapsed = strip(dialog.render(100).join('\n'));
-    expect(collapsed).toContain('ses-42/agents/main/task-0.jsonl');
-    expect(collapsed).not.toContain('ses-42/agents/main/task-12.jsonl');
-    expect(collapsed).toContain('3 more');
+    expect(collapsed).toContain('agents/main/task-0.jsonl');
+    expect(collapsed).not.toContain('agents/main/task-12.jsonl');
+    expect(collapsed).toContain('15 files in session.zip · showing 1–5 of 15 session files');
+    expect(collapsed).toContain('10 more files · → next page');
 
-    dialog.handleInput('\t');
+    dialog.handleInput(`${ESC}[C`);
+    dialog.handleInput(`${ESC}[6~`);
     dialog.handleInput(`${ESC}[6~`);
     const expanded = strip(dialog.render(100).join('\n'));
-    expect(expanded).toContain('ses-42/agents/main/task-10.jsonl');
-    expect(expanded).toContain('ses-42/agents/main/task-14.jsonl');
-    expect(expanded).toContain('Files 6–15/15');
+    expect(expanded).toContain('agents/main/task-10.jsonl');
+    expect(expanded).toContain('agents/main/task-14.jsonl');
+    expect(expanded).toContain('15 files in session.zip · showing 11–15 of 15 session files');
+    expect(expanded).not.toContain('0 more below');
+    expect(expanded).toContain('← previous page');
+
+    dialog.handleInput(`${ESC}[D`);
+    dialog.handleInput(`${ESC}[B`);
+    const collapsedAgain = strip(dialog.render(100).join('\n'));
+    expect(collapsedAgain).toContain('Current session logs');
     for (const width of [100, 40, 20]) {
       expect(dialog.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
     }
@@ -211,7 +219,7 @@ describe('promptFeedbackAttachment', () => {
     const rendered = strip(mounted!.render(100).join('\n'));
 
     expect(rendered).not.toContain('No attachment');
-    expect(rendered).toContain('Logs only');
-    expect(rendered).not.toContain('Logs + codebase');
+    expect(rendered).toContain('Current session logs');
+    expect(rendered).not.toContain('Session logs + project code');
   });
 });

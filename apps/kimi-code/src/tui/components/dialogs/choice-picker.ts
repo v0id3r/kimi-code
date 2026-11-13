@@ -316,8 +316,7 @@ export interface PreviewChoicePickerOptions extends ChoicePickerOptions {
   readonly preview: ChoicePreview;
   readonly layout?: DockLayout;
   readonly previewLabel?: string;
-  readonly onPreviewToggle?: () => boolean;
-  readonly onPreviewPage?: (direction: -1 | 1) => void;
+  readonly onPreviewScroll?: (direction: -1 | 1, page: boolean) => boolean;
 }
 
 const PREVIEW_LABEL = [' Preview', ''] as const;
@@ -339,19 +338,20 @@ export class PreviewChoicePickerComponent extends DockSection implements Focusab
   }
 
   handleInput(data: string): void {
-    if (
-      this.opts.onPreviewPage !== undefined &&
-      (matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown))
-    ) {
-      this.opts.onPreviewPage(matchesKey(data, Key.pageUp) ? -1 : 1);
+    if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)) {
+      this.opts.onPreviewScroll?.(matchesKey(data, Key.pageUp) ? -1 : 1, true);
       return;
     }
     if (matchesKey(data, 'shift+up') || matchesKey(data, 'shift+down')) {
       if (this.layout !== undefined) this.scrollBody(matchesKey(data, 'shift+up') ? -1 : 1);
       return;
     }
-    if (matchesKey(data, Key.tab) && this.opts.onPreviewToggle?.() === true) {
-      this.scrollBodyToTop();
+    if (matchesKey(data, Key.right)) {
+      this.opts.onPreviewScroll?.(1, false);
+      return;
+    }
+    if (matchesKey(data, Key.left)) {
+      this.opts.onPreviewScroll?.(-1, false);
       return;
     }
     this.showingNewChoiceFromTop(() => {
@@ -373,7 +373,7 @@ export class PreviewChoicePickerComponent extends DockSection implements Focusab
       case 'head': {
         const hints = [
           this.bodyOverflows(width) ? 'shift+↑/↓ scroll' : undefined,
-          this.opts.onPreviewToggle === undefined ? undefined : 'Tab toggle files',
+          this.opts.onPreviewScroll === undefined ? undefined : '←→ file page',
         ].filter((part) => part !== undefined);
         return [
           ...this.picker.renderHead(width, hints.length > 0 ? ` · ${hints.join(' · ')}` : ''),

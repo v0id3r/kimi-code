@@ -84,14 +84,14 @@ export type FeedbackAttachmentLevel = 'logs' | 'logs+codebase';
 const FEEDBACK_ATTACHMENT_OPTIONS: readonly ChoiceOption[] = [
   {
     value: 'logs',
-    label: 'Logs only',
-    description: 'Upload session.zip with the current session files listed below',
+    label: 'Current session logs',
+    description: 'Upload the files listed below with your feedback',
   },
   {
     value: 'logs+codebase',
-    label: 'Logs + codebase',
+    label: 'Session logs + project code',
     description:
-      'Also upload repo.zip from this workspace (excludes .git, node_modules, build outputs, .env files except .example/.sample/.template, private keys, and credential files/dirs). Attachments are used only for diagnosis and never shared.',
+      'Also upload source files from this workspace to help reproduce the issue. Secrets, dependencies, and build outputs are excluded.',
     descriptionTone: 'warning',
   },
 ];
@@ -110,23 +110,23 @@ export function promptFeedbackAttachment(
   const options = excludeCodebase
     ? FEEDBACK_ATTACHMENT_OPTIONS.filter((option) => option.value !== 'logs+codebase')
     : FEEDBACK_ATTACHMENT_OPTIONS;
-  let expanded = false;
   let scroll = 0;
   return new Promise((resolve) => {
     const picker = new PreviewChoicePickerComponent({
-      title: 'Share diagnostic info to help us investigate?',
+      title: 'Choose what to include with your feedback',
       notice:
-        'The following data will be submitted for troubleshooting:\n' +
-        '- Feedback note and metadata (`session_id`, `request_id`, active model, CLI version, OS, shell)\n' +
-        '- `session.zip`: every file in the selected session is listed below. `file-history` snapshots are excluded.\n' +
-        '- `global/`: shared application logs, which may mention other sessions.',
+        'Your note, session ID, request IDs, model, CLI version, OS, and shell are always included. Choose whether to add diagnostics below.',
       options,
       layout:
         host.state.dockContainer === undefined ? undefined : { maxBodyRows: DOCK_PREVIEW_ROWS },
-      previewLabel:
-        session === undefined ? ' session.zip' : ` ${session.sessionId} · ${session.sessionDir}`,
-      onPreviewPage: (direction) => {
-        scroll += direction * 10;
+      previewLabel: session === undefined ? ' session.zip' : ` Current session · ${session.sessionId}`,
+      onPreviewScroll: (direction, page) => {
+        if (session === undefined) return false;
+        scroll = Math.max(
+          0,
+          Math.min(Math.max(0, session.entries.length - 5), scroll + direction * (page ? 5 : 1)),
+        );
+        return true;
       },
       preview: {
         render: () => {
@@ -136,37 +136,27 @@ export function promptFeedbackAttachment(
             ];
           const global = session.entries.filter((entry) => entry.startsWith('logs/global/'));
           const files = session.entries.filter((entry) => !entry.startsWith('logs/global/'));
-          const visible = expanded ? files : files.slice(0, 12);
-          const hidden = expanded ? 0 : files.length - visible.length;
-          const maxScroll = Math.max(0, visible.length - 10);
+          const visible = files;
+          const maxScroll = Math.max(0, visible.length - 5);
           scroll = Math.max(0, Math.min(scroll, maxScroll));
-          const shown = expanded ? visible.slice(scroll, scroll + 10) : visible;
+          const shown = visible.slice(scroll, scroll + 5);
+          const last = scroll + shown.length;
           return [
-            `  ${session.sessionId}/ (${String(files.length)} files${hidden > 0 ? `, ${String(hidden)} more` : ''})`,
-            ...shown.map((entry) => `  ${session.sessionId}/${entry}`),
-            ...(expanded && maxScroll > 0
+            `  ${String(session.entries.length)} files in session.zip · showing ${String(scroll + 1)}–${String(last)} of ${String(files.length)} session files`,
+            ...shown.map((entry) => `  ${entry}`),
+            ...(last < files.length ? [`  ${String(files.length - last)} more files · → next page`] : []),
+            ...(scroll > 0 ? ['  ← previous page'] : []),
+            ...(global.length > 0
               ? [
-                  `  Files ${String(scroll + 1)}–${String(scroll + shown.length)}/${String(files.length)} · PgUp/PgDn scroll`,
+                  '',
+                  `  Also included: ${global.join(', ')} (application logs; may mention other sessions)`,
                 ]
               : []),
-            ...(hidden > 0 ? ['  Tab show all files'] : []),
-            ...(expanded ? ['  Tab collapse files'] : []),
-            '',
-            '  global/ (shared application logs; may mention other sessions)',
-            ...global.map((entry) => `  global/${entry.slice('logs/global/'.length)}`),
           ];
         },
         invalidate: () => {},
         dispose: () => {},
       },
-      onPreviewToggle:
-        session === undefined || session.entries.length <= 12
-          ? undefined
-          : () => {
-              expanded = !expanded;
-              scroll = 0;
-              return true;
-            },
       onSelect: (value) => {
         host.restoreEditor();
         resolve(value as FeedbackAttachmentLevel);
