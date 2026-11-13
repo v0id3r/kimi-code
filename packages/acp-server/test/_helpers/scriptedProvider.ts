@@ -14,6 +14,7 @@ interface ScriptedResponse {
   readonly finishReason?: FinishReason | null;
   readonly rawFinishReason?: string | null;
   readonly usage?: TokenUsage;
+  readonly gate?: Promise<void>;
 }
 
 const ZERO_USAGE: TokenUsage = {
@@ -36,6 +37,7 @@ class ScriptedStream {
   ) {}
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
+    if (this.response.gate !== undefined) await this.response.gate;
     for (const part of this.parts) {
       yield part;
     }
@@ -90,6 +92,7 @@ export interface ScriptedProvider {
   readonly seed: readonly [typeof IProtocolAdapterRegistry, IProtocolAdapterRegistryType];
   mockNextText(text: string): void;
   mockNextTextWithUsage(text: string, usage: TokenUsage): void;
+  mockNextGatedText(text: string, gate: Promise<void>): void;
   mockNextResponse(...parts: StreamedMessagePart[]): void;
   mockNextProviderResponse(response: {
     readonly parts?: readonly StreamedMessagePart[];
@@ -162,6 +165,9 @@ export function createScriptedProvider(): ScriptedProvider {
     },
     mockNextTextWithUsage: (text, usage) => {
       queue.push({ parts: [{ type: 'text', text }], usage });
+    },
+    mockNextGatedText: (text, gate) => {
+      queue.push({ parts: [{ type: 'text', text }], gate });
     },
     mockNextResponse: (...parts) => {
       queue.push({ parts: structuredClone(parts) });

@@ -30,6 +30,7 @@ export const turnEndedEventSchema = z.object({
   interruptReason: z
     .enum(['user_cancelled', 'aborted', 'max_steps', 'error', 'filtered', 'blocked'])
     .optional(),
+  stopReason: z.string().optional(),
   requestId: z.string().optional(),
 });
 
