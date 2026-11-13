@@ -77,8 +77,11 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     });
 
     const chunk = await c.waitForSessionUpdate('agent_message_chunk', 10_000);
-    const update = (chunk.params as { update?: { content?: { text?: string } } }).update;
+    const update = (
+      chunk.params as { update?: { content?: { text?: string }; _meta?: { turnId?: number } } }
+    ).update;
     expect(update?.content?.text).toContain('hello from the scripted model');
+    expect(typeof update?._meta?.turnId).toBe('number');
 
     const result = (await promptPromise) as { stopReason: string };
     expect(result.stopReason).toBe('end_turn');
@@ -629,6 +632,18 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       .map((u) => u?.content?.text ?? '');
   }
 
+  it('advertises prompt queueing in initialize agent capabilities', async () => {
+    homeDir = await mkdtemp(join(tmpdir(), 'acp-e2e-turn-'));
+    await writeFakeModelConfig(homeDir);
+    scripted = createScriptedProvider();
+    client = await createTestClient({ homeDir, extraSeeds: [scripted.seed] });
+    const init = (await client.send('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {},
+    })) as { agentCapabilities?: { _meta?: { promptQueueing?: boolean } } };
+    expect(init.agentCapabilities?._meta?.promptQueueing).toBe(true);
+  }, 30_000);
+
   it('holds a prompt submitted during an engine-internal turn and answers it once the queue drains', async () => {
     const c = await boot();
     const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
@@ -661,6 +676,21 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     const texts = chunkTexts(c);
     expect(texts.indexOf('notification turn work')).toBeGreaterThanOrEqual(0);
     expect(texts.indexOf('answer after the queue')).toBeGreaterThan(texts.indexOf('notification turn work'));
+
+    const updates = c.sessionUpdates().map((m) => m.params as {
+      update?: { sessionUpdate?: string; content?: { text?: string }; _meta?: { turnId?: number } };
+    });
+    const byText = (text: string) =>
+      updates.find((u) => u.update?.sessionUpdate === 'agent_message_chunk' && u.update?.content?.text === text);
+    const internalTurnId = byText('notification turn work')?.update?._meta?.turnId;
+    const answerTurnId = byText('answer after the queue')?.update?._meta?.turnId;
+    expect(typeof internalTurnId).toBe('number');
+    expect(typeof answerTurnId).toBe('number');
+    expect(answerTurnId).not.toBe(internalTurnId);
+    const closing = updates.find(
+      (u) => u.update?.sessionUpdate === 'usage_update' && u.update?._meta?.turnId === internalTurnId,
+    );
+    expect(closing).toBeDefined();
   }, 30_000);
 
   it('rolls a prompt_only flush into the follow-up notification turn instead of settling empty', async () => {

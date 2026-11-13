@@ -149,6 +149,9 @@ export class AcpServer {
       },
       mcpCapabilities: { http: true, sse: true },
       auth: { logout: {} },
+      _meta: {
+        promptQueueing: true,
+      },
     };
 
     return {
