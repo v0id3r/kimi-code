@@ -372,10 +372,19 @@ export function configOptionUpdateNotification(
   };
 }
 
+export interface AcpUsageTokens {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheCreationInputTokens: number;
+}
+
 export function usageUpdateNotification(
   sessionId: string,
   used: number,
   size: number,
+  tokens?: AcpUsageTokens,
 ): SessionNotification {
   return {
     sessionId,
@@ -383,6 +392,7 @@ export function usageUpdateNotification(
       sessionUpdate: 'usage_update',
       used,
       size,
+      ...(tokens === undefined ? {} : { _meta: { usage: tokens } }),
     },
   };
 }
