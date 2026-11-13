@@ -6,6 +6,9 @@ import {
   type ModelAlias,
   type ThinkingEffort,
 } from '@moonshot-ai/kimi-code-sdk';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 import { capabilitiesForModel } from '@moonshot-ai/kimi-code-oauth';
 import type {
   ManagedKimiCodeModelInfo,
@@ -22,6 +25,7 @@ import { FeedbackInputDialogComponent, type FeedbackInputDialogResult } from '..
 import { ModelSelectorComponent } from '../components/dialogs/model-selector';
 import { PlatformSelectorComponent } from '../components/dialogs/platform-selector';
 import { DOCK_PREVIEW_ROWS } from '../constant/rendering';
+import { toTerminalHyperlink } from '#/utils/terminal-hyperlink';
 import type { SlashCommandHost } from './dispatch';
 
 export function promptPlatformSelection(host: SlashCommandHost): Promise<string | undefined> {
@@ -143,7 +147,10 @@ export function promptFeedbackAttachment(
           const last = scroll + shown.length;
           return [
             `  ${String(session.entries.length)} files in session.zip · showing ${String(scroll + 1)}–${String(last)} of ${String(files.length)} session files`,
-            ...shown.map((entry) => `  ${entry}`),
+            ...shown.map((entry) => {
+              const absolute = join(session.sessionDir, entry);
+              return `  ${toTerminalHyperlink(absolute, pathToFileURL(absolute).href)}`;
+            }),
             ...(last < files.length ? [`  ${String(files.length - last)} more files · → next page`] : []),
             ...(scroll > 0 ? ['  ← previous page'] : []),
             ...(global.length > 0

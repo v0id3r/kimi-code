@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from 'node:util';
+
 import { visibleWidth, type Component, type Focusable } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
@@ -14,7 +16,7 @@ const CTRL_C = String.fromCodePoint(3);
 const ANSI_RE = new RegExp(`${ESC}\\[[0-9;]*m`, 'g');
 
 function strip(text: string): string {
-  return text.replaceAll(ANSI_RE, '');
+  return stripVTControlCharacters(text).replaceAll(ANSI_RE, '');
 }
 
 beforeAll(() => {
@@ -150,9 +152,9 @@ describe('promptFeedbackAttachment', () => {
     expect(rendered).toContain('Choose what to include with your feedback');
     expect(rendered).toContain('session ID, request IDs, model, CLI version, OS, and shell');
     expect(rendered).toContain('5 files in session.zip · showing 1–4 of 4 session files');
-    expect(rendered).toContain('  agents/main/wire.jsonl');
-    expect(rendered).toContain('  state.json');
-    expect(rendered).toContain('  manifest.json');
+    expect(rendered).toContain('  /tmp/sessions/ses-42/agents/main/wire.jsonl');
+    expect(rendered).toContain('  /tmp/sessions/ses-42/state.json');
+    expect(rendered).toContain('  /tmp/sessions/ses-42/manifest.json');
     expect(rendered).toContain('logs/global/kimi-code.log');
     expect(rendered).toContain('Secrets, dependencies,');
     expect(rendered).toContain('and build outputs are excluded.');
@@ -180,21 +182,21 @@ describe('promptFeedbackAttachment', () => {
     expect(mounted).toBeDefined();
     const dialog = mounted as Component & Focusable & { handleInput: (data: string) => void };
     const collapsed = strip(dialog.render(100).join('\n'));
-    expect(collapsed).toContain('agents/main/task-0.jsonl');
-    expect(collapsed).not.toContain('agents/main/task-12.jsonl');
+    expect(collapsed).toContain('/tmp/sessions/ses-42/agents/main/task-0.jsonl');
+    expect(collapsed).not.toContain('/tmp/sessions/ses-42/agents/main/task-12.jsonl');
     expect(collapsed).toContain('15 files in session.zip · showing 1–5 of 15 session files');
     expect(collapsed).toContain('10 more files · → next page');
 
     dialog.handleInput(`${ESC}[C`);
     const secondPage = strip(dialog.render(100).join('\n'));
     expect(secondPage).toContain('15 files in session.zip · showing 6–10 of 15 session files');
-    expect(secondPage).toContain('agents/main/task-5.jsonl');
-    expect(secondPage).toContain('agents/main/task-9.jsonl');
+    expect(secondPage).toContain('/tmp/sessions/ses-42/agents/main/task-5.jsonl');
+    expect(secondPage).toContain('/tmp/sessions/ses-42/agents/main/task-9.jsonl');
 
     dialog.handleInput(`${ESC}[C`);
     const expanded = strip(dialog.render(100).join('\n'));
-    expect(expanded).toContain('agents/main/task-10.jsonl');
-    expect(expanded).toContain('agents/main/task-14.jsonl');
+    expect(expanded).toContain('/tmp/sessions/ses-42/agents/main/task-10.jsonl');
+    expect(expanded).toContain('/tmp/sessions/ses-42/agents/main/task-14.jsonl');
     expect(expanded).toContain('15 files in session.zip · showing 11–15 of 15 session files');
     expect(expanded).not.toContain('0 more below');
     expect(expanded).toContain('← previous page');
