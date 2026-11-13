@@ -15,8 +15,9 @@
  * `prompt_only` flush rolls into the follow-up turn that actually answers,
  * and `prompt.completed` settles only a hook-blocked prompt that never runs.
  * Turns with no ACP owner (engine-internal notification turns) still stream
- * their events to the client — the agent's work stays visible between
- * prompts, matching the CLI.
+ * their events to the client and report their working/idle lifecycle through
+ * `_meta.jaz.stateUpdate` — the agent's work stays visible between prompts,
+ * matching the CLI.
  *
  * KLIENT GAPS (all reported; each marked `KLIENT-GAP` inline):
  *  - no session MCP connection view / compaction service → the `/mcp` and
@@ -1136,6 +1137,16 @@ export class AcpSession {
     });
   }
 
+  private emitAgentWork(turnId: number, state: 'working' | 'idle', stopReason?: string): void {
+    this.emitTurn(turnId, {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: 'session_info_update',
+        _meta: { jaz: { stateUpdate: { state, stopReason } } },
+      },
+    });
+  }
+
   /**
    * Adopt turns for the waiting driver. Two cases: the queue drained to OUR
    * queued prompt (`turn.started` echoes its promptId), or the driver is
@@ -1147,7 +1158,10 @@ export class AcpSession {
    */
   private onTurnStarted(event: AgentEventPayloads['turn.started']): void {
     const driver = this.driver;
-    if (driver === undefined || driver.settled || driver.turnId !== undefined) return;
+    if (driver === undefined || driver.settled || driver.turnId !== undefined) {
+      this.emitAgentWork(event.turnId, 'working');
+      return;
+    }
     if (driver.queued && driver.promptId !== undefined && event.promptId === driver.promptId) {
       driver.queued = false;
       driver.turnId = event.turnId;
@@ -1178,6 +1192,9 @@ export class AcpSession {
         waiter.turnId = event.turnId;
         waiter.awaitingNextTurn = false;
       }
+    }
+    if (!driver.launchPending && this.driverFor(event.turnId) === undefined) {
+      this.emitAgentWork(event.turnId, 'working');
     }
   }
 
@@ -1231,9 +1248,9 @@ export class AcpSession {
     }
     const driver = this.driverFor(event.turnId);
     if (driver === undefined) {
-      // Ownerless turn (engine-internal): nothing to settle. Close it out
-      // with the same usage_update owned turns get — it doubles as the
-      // turn-end marker for clients tracking `_meta.turnId`.
+      const error = event.error as { readonly code: string; readonly message?: string } | undefined;
+      const stopReason = event.reason === 'failed' ? 'error' : turnEndReasonToStopReason(event.reason, error);
+      this.emitAgentWork(event.turnId, 'idle', stopReason);
       if (event.stopReason !== 'prompt_only') void this.emitUsageUpdate(event.turnId);
       return;
     }

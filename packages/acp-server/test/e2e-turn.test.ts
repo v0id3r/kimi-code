@@ -863,7 +863,11 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     // The internal turn's chunks share one engine turn id, distinct from the
     // answering turn's, and the turn closes with a usage_update marker.
     const updates = c.sessionUpdates().map((m) => m.params as {
-      update?: { sessionUpdate?: string; content?: { text?: string }; _meta?: { turnId?: number } };
+      update?: {
+        sessionUpdate?: string;
+        content?: { text?: string };
+        _meta?: { turnId?: number; jaz?: { stateUpdate?: { state?: string } } };
+      };
     });
     const byText = (text: string) =>
       updates.find((u) => u.update?.sessionUpdate === 'agent_message_chunk' && u.update?.content?.text === text);
@@ -876,6 +880,11 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       (u) => u.update?.sessionUpdate === 'usage_update' && u.update?._meta?.turnId === internalTurnId,
     );
     expect(closing).toBeDefined();
+    const states = updates
+      .filter((u) => u.update?._meta?.turnId === internalTurnId)
+      .map((u) => u.update?._meta?.jaz?.stateUpdate?.state)
+      .filter((state) => state !== undefined);
+    expect(states).toEqual(['working', 'idle']);
   }, 30_000);
 
   it('rolls a prompt_only flush into the follow-up notification turn instead of settling empty', async () => {
