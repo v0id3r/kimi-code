@@ -154,6 +154,8 @@ export interface GlobalSessionsFacade {
     title?: string;
     mcpServers?: Readonly<Record<string, McpServerConfig>>;
     environmentId?: string;
+    /** Ephemeral host system-prompt append, applied to the main agent's model-facing prompt only. */
+    systemPromptAppend?: string;
   }): Promise<SessionMeta>;
 }
 
@@ -423,9 +425,9 @@ export function createGlobalFacade(scoped: ScopedCaller, scopedStream: ScopedStr
       get: (id) => call('sessionIndex', 'get', [id]) as Promise<SessionSummary | undefined>,
       countActive: (workspaceIds) =>
         call('sessionIndex', 'count', [{ workspaceIds }]) as Promise<number>,
-      create: async ({ workDir, additionalDirs, title, mcpServers, environmentId }) => {
+      create: async ({ workDir, additionalDirs, title, mcpServers, environmentId, systemPromptAppend }) => {
         const handle = (await scoped({}, 'sessionManager', 'create', [
-          { workDir, additionalDirs, mcpServers, environmentId },
+          { workDir, additionalDirs, mcpServers, environmentId, systemPromptAppend },
         ])) as { id: string };
         const scope = { sessionId: handle.id };
         if (title !== undefined) {

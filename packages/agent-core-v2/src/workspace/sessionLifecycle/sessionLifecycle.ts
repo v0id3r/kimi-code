@@ -18,6 +18,8 @@ export interface CreateSessionOptions {
   readonly environmentId?: string;
   readonly environmentCwd?: string;
   readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
+  /** Ephemeral host system-prompt append, applied to the main agent's model-facing prompt only. */
+  readonly systemPromptAppend?: string;
   readonly prepare?: (session: ISessionScopeHandle) => Promise<void>;
 }
 
@@ -32,6 +34,8 @@ export interface ForkSessionOptions {
 export interface ResumeSessionOptions {
   readonly additionalDirs?: readonly string[];
   readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
+  /** Ephemeral host system-prompt append, applied when resume re-materializes a cold session. */
+  readonly systemPromptAppend?: string;
 }
 
 export interface CreateChildSessionOptions {

@@ -46,6 +46,8 @@ interface HandleWire {
 export interface SessionRestoreOptions {
   readonly additionalDirs?: readonly string[];
   readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
+  /** Ephemeral host system-prompt append, applied when restore re-materializes a cold session. */
+  readonly systemPromptAppend?: string;
 }
 
 export interface SessionApprovalsFacade {

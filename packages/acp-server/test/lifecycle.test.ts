@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -264,6 +264,65 @@ describe('acp-server session lifecycle', () => {
       expect(userChunks).toContain('hello from the fork');
       expect(agentChunks).toContain('first turn reply');
       expect(agentChunks).toContain('fork reply');
+    },
+    30_000,
+  );
+
+  it(
+    'appends session _meta.systemPrompt to the model-facing system prompt without persisting it',
+    async () => {
+      homeDir = await mkdtemp(join(tmpdir(), 'acp-system-prompt-'));
+      await writeFakeModelConfig(homeDir);
+      const scripted = createScriptedProvider();
+      client = await createTestClient({ homeDir, extraSeeds: [scripted.seed] });
+      const c = client;
+      await c.send('initialize', { protocolVersion: 1, clientCapabilities: {} });
+
+      const hostA = 'Host instructions for session A (sentinel-a).';
+      const hostB = 'Host instructions for session B (sentinel-b).';
+      const params = (systemPrompt: string) => ({
+        cwd: homeDir,
+        mcpServers: [],
+        _meta: { systemPrompt },
+      });
+      const expectTurnSystemPrompt = async (sessionId: string, host: string): Promise<void> => {
+        scripted.mockNextText('ok');
+        await c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hello' }] });
+        const system = scripted.systemPrompts().at(-1)!;
+        expect(system.endsWith(`\n\n${host}`)).toBe(true);
+        expect(system.length).toBeGreaterThan(host.length + 100);
+        expect(system.match(/sentinel-/g)).toHaveLength(1);
+        expect(JSON.stringify(scripted.callHistory().at(-1))).not.toContain('sentinel-');
+      };
+
+      const { sessionId: a } = (await c.send('session/new', params(hostA))) as {
+        sessionId: string;
+      };
+      const { sessionId: b } = (await c.send('session/new', params(hostB))) as {
+        sessionId: string;
+      };
+      await c.waitForSessionUpdate('available_commands_update', 10_000);
+      await expectTurnSystemPrompt(a, hostA);
+      await expectTurnSystemPrompt(b, hostB);
+
+      for (const method of ['session/load', 'session/resume']) {
+        await c.send('session/close', { sessionId: a });
+        await c.send(method, { sessionId: a, ...params(hostA) });
+        await expectTurnSystemPrompt(a, hostA);
+      }
+      const forked = (await c.send('session/fork', { sessionId: a, ...params(hostB) })) as {
+        sessionId: string;
+      };
+      await expectTurnSystemPrompt(forked.sessionId, hostB);
+
+      await c.close();
+      client = undefined;
+      const sessionsDir = join(homeDir, 'sessions');
+      for (const entry of await readdir(sessionsDir, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const content = await readFile(join(entry.parentPath, entry.name), 'utf8');
+        expect(content, entry.name).not.toContain('sentinel-');
+      }
     },
     30_000,
   );

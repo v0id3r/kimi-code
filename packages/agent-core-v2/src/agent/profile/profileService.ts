@@ -533,7 +533,15 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   }
 
   getSystemPrompt(snapshot: ProfileBindingSnapshot = this.profileState): string {
-    return snapshot.systemPrompt;
+    const base = snapshot.systemPrompt;
+    // Host-provided append (ACP session _meta.systemPrompt) is model-facing
+    // only: snapshots/profile state keep the native prompt, so nothing
+    // ephemeral is ever persisted.
+    const append =
+      this.scopeContext.agentId === MAIN_AGENT_ID
+        ? this.sessionContext.systemPromptAppend
+        : undefined;
+    return append ? `${base}\n\n${append}` : base;
   }
 
   getActiveToolNames(snapshot: ProfileBindingSnapshot = this.profileState): readonly string[] | undefined {

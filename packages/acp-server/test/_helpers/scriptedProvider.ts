@@ -131,16 +131,20 @@ export interface ScriptedProvider {
   callCount(): number;
   /** The `history` argument of every `generate()` call so far, in order. */
   callHistory(): ReadonlyArray<readonly Message[]>;
+  /** The model-facing system prompt of every `generate()` call so far, in order. */
+  systemPrompts(): readonly string[];
 }
 
 export function createScriptedProvider(): ScriptedProvider {
   const queue: ScriptedResponse[] = [];
   const calls: Array<readonly Message[]> = [];
+  const systemPrompts: string[] = [];
   // Single shared provider so every ModelImpl in the process (main agent,
   // sub-agents) draws from the same FIFO queue.
   const provider = new ScriptedChatProvider(queue, calls);
   const requester: LlmRequester = {
     async generate(config, content, control) {
+      systemPrompts.push(config.systemPrompt ?? '');
       control.onEvent?.({ type: 'llm.sent' });
       try {
         const stream = await provider.generate(
@@ -209,5 +213,6 @@ export function createScriptedProvider(): ScriptedProvider {
     },
     callCount: () => calls.length,
     callHistory: () => calls,
+    systemPrompts: () => systemPrompts,
   };
 }

@@ -236,6 +236,7 @@ export class AcpServer {
           : TERMINAL_AUTH_METHOD,
       ],
       ...(this.agentInfo ? { agentInfo: this.agentInfo } : {}),
+      _meta: { [SYSTEM_PROMPT_APPEND_META]: true },
     };
   }
 
@@ -248,6 +249,7 @@ export class AcpServer {
       workDir: params.cwd,
       additionalDirs: params.additionalDirectories,
       mcpServers: acpMcpServersToConfigRecord(params.mcpServers),
+      systemPromptAppend: systemPromptAppend(params._meta),
       environmentId: 'local',
     });
     return { sessionId: meta.id, ...(await this.activateSession(meta.id)) };
@@ -284,7 +286,9 @@ export class AcpServer {
       }
       throw error;
     }
-    const restored = await this.klient.session(forkedId).restore();
+    const restored = await this.klient
+      .session(forkedId)
+      .restore({ systemPromptAppend: systemPromptAppend(params._meta) });
     if (!restored) {
       throw RequestError.invalidParams(
         { sessionId: forkedId },
@@ -297,10 +301,10 @@ export class AcpServer {
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     await this.ensureAuthed();
     this.warnIgnoredAdditionalDirs('session/load', params.additionalDirectories);
-    const acpSession = await this.resumeAcpSession(
-      params.sessionId,
-      acpMcpServersToConfigRecord(params.mcpServers),
-    );
+    const acpSession = await this.resumeAcpSession(params.sessionId, {
+      mcpServers: acpMcpServersToConfigRecord(params.mcpServers),
+      systemPromptAppend: systemPromptAppend(params._meta),
+    });
     // Replay the persisted history as an ordered batch of `session/update`
     // notifications BEFORE settling, so the client re-renders prior turns
     // before the load response lands. This is the one differentiator vs.
@@ -313,10 +317,10 @@ export class AcpServer {
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
     await this.ensureAuthed();
     this.warnIgnoredAdditionalDirs('session/resume', params.additionalDirectories);
-    const acpSession = await this.resumeAcpSession(
-      params.sessionId,
-      acpMcpServersToConfigRecord(params.mcpServers),
-    );
+    const acpSession = await this.resumeAcpSession(params.sessionId, {
+      mcpServers: acpMcpServersToConfigRecord(params.mcpServers),
+      systemPromptAppend: systemPromptAppend(params._meta),
+    });
     this.scheduleAvailableCommandsUpdate(acpSession);
     return { configOptions: await acpSession.configOptions(), modes: acpSession.modeState() };
   }
@@ -534,17 +538,18 @@ export class AcpServer {
   /**
    * Resume a persisted session into the live scope tree and build its ACP
    * session. An unknown session id maps to ACP `invalid_params` (-32602)
-   * rather than a generic internal error. `mcpServers` (already converted to
-   * the engine record shape) is forwarded to the re-materialize path; it is
-   * ignored when the session is already live (restore passes through).
+   * rather than a generic internal error. `opts` (MCP servers already
+   * converted to the engine record shape, host system-prompt append) is
+   * forwarded to the re-materialize path; it is ignored when the session is
+   * already live (restore passes through).
    */
   private async resumeAcpSession(
     sessionId: string,
-    mcpServers?: SessionRestoreOptions['mcpServers'],
+    opts: SessionRestoreOptions,
   ): Promise<AcpSession> {
     // `restore` re-materializes a persisted session (a live one passes
     // through) and reports `false` only when the id no longer exists.
-    const restored = await this.klient.session(sessionId).restore({ mcpServers });
+    const restored = await this.klient.session(sessionId).restore(opts);
     if (!restored) {
       throw RequestError.invalidParams({ sessionId }, `Unknown sessionId: ${sessionId}`);
     }
@@ -662,6 +667,21 @@ export class AcpServer {
 
 /** The custom ACP method name for per-session model selection. */
 const SET_SESSION_MODEL_METHOD = 'session/set_model';
+
+/**
+ * `initialize._meta` key advertising that session `_meta.systemPrompt` is
+ * appended to the native system prompt, so hosts can feature-detect it.
+ */
+const SYSTEM_PROMPT_APPEND_META = 'jaz.dev/systemPromptAppend';
+
+/**
+ * Host instructions from session `_meta.systemPrompt`, appended to the main
+ * agent's native system prompt for this live session only (never persisted).
+ */
+function systemPromptAppend(meta: Record<string, unknown> | null | undefined): string | undefined {
+  const value = meta?.['systemPrompt'];
+  return typeof value === 'string' ? value.trim() || undefined : undefined;
+}
 
 /** Parsed params of the custom `session/set_model` request. */
 export interface SetSessionModelParams {

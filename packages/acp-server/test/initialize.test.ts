@@ -87,6 +87,7 @@ describe('acp-server initialize handshake', () => {
             mcpCapabilities: { http: true, sse: true },
             sessionCapabilities: { additionalDirectories: {}, delete: {}, fork: {} },
           },
+          _meta: { 'jaz.dev/systemPromptAppend': true },
         });
 
         await server.close();

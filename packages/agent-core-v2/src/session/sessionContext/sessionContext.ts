@@ -15,6 +15,8 @@ export interface ISessionContext {
   readonly sessionDir: string;
   readonly metaScope: string;
   readonly cwd: string;
+  /** Ephemeral host system-prompt append for this live session (never persisted). */
+  readonly systemPromptAppend?: string;
   scope(subKey?: string): string;
 }
 
@@ -42,6 +44,7 @@ export function makeSessionContext(input: {
   readonly sessionScope: string;
   readonly cwd: string;
   readonly metaScope?: string;
+  readonly systemPromptAppend?: string;
 }): ISessionContext {
   const { sessionScope } = input;
   return {
@@ -51,6 +54,7 @@ export function makeSessionContext(input: {
     sessionDir: input.sessionDir,
     metaScope: input.metaScope ?? sessionScope,
     cwd: input.cwd,
+    systemPromptAppend: input.systemPromptAppend,
     scope: (subKey?: string): string =>
       subKey === undefined || subKey === '' ? sessionScope : `${sessionScope}/${subKey}`,
   };
