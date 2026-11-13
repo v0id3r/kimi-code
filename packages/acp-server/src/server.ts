@@ -222,6 +222,12 @@ export class AcpServer {
       // is not supported (dropped with a warning — see `./convert`).
       mcpCapabilities: { http: true, sse: true },
       auth: { logout: {} },
+      _meta: {
+        // Prompts submitted while a turn runs are accepted and queued (the
+        // adapter tracks them by client-chosen promptId to the turn that
+        // actually answers) — hosts may type ahead with plain session/prompt.
+        promptQueueing: true,
+      },
     };
 
     return {

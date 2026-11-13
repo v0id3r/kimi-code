@@ -887,11 +887,11 @@ export class AcpSession {
   }
 
   private onAssistantDelta(event: AgentEventPayloads['assistant.delta']): void {
-    this.emit(assistantDeltaToSessionUpdate(this.sessionId, event));
+    this.emitTurn(event.turnId, assistantDeltaToSessionUpdate(this.sessionId, event));
   }
 
   private onThinkingDelta(event: AgentEventPayloads['thinking.delta']): void {
-    this.emit(thinkingDeltaToSessionUpdate(this.sessionId, event));
+    this.emitTurn(event.turnId, thinkingDeltaToSessionUpdate(this.sessionId, event));
   }
 
   private onToolCallStarted(event: AgentEventPayloads['tool.call.started']): void {
@@ -923,13 +923,15 @@ export class AcpSession {
     const streamArgs = { args: stringifyArgs(mapped.args) };
     const lazyCreated = this.toolCallStreamArgs.has(key);
     this.toolCallStreamArgs.set(key, streamArgs);
-    this.emit(
+    this.emitTurn(
+      event.turnId,
       lazyCreated
         ? toolCallStartedUpgradeToSessionUpdate(this.sessionId, mapped)
         : toolCallStartToSessionUpdate(this.sessionId, mapped),
     );
     if (event.display !== undefined) {
-      this.emit(
+      this.emitTurn(
+        event.turnId,
         planFromDisplayBlock(this.sessionId, event.turnId, event.display as ToolInputDisplay),
       );
     }
@@ -948,12 +950,12 @@ export class AcpSession {
       // — clients otherwise surface "Tool call not found" until the start
       // eventually lands.
       this.toolCallStreamArgs.set(key, { args: event.argumentsPart ?? '' });
-      this.emit(toolCallLazyCreateToSessionUpdate(this.sessionId, mapped));
+      this.emitTurn(event.turnId, toolCallLazyCreateToSessionUpdate(this.sessionId, mapped));
       return;
     }
     // Subsequent delta — the helper accumulates the fragment and emits an
     // update with the cumulative args text (REPLACE-content semantics).
-    this.emit(toolCallDeltaToSessionUpdate(this.sessionId, mapped, acc));
+    this.emitTurn(event.turnId, toolCallDeltaToSessionUpdate(this.sessionId, mapped, acc));
   }
 
   private onToolUpdated(event: AgentEventPayloads['tool.updated']): void {
@@ -964,7 +966,10 @@ export class AcpSession {
     // The klient payload mirrors `ToolUpdatedEvent` field-for-field; the
     // helper forwards only `status` updates with text (as a title refresh)
     // and returns null for everything else, which `emit` drops.
-    this.emit(toolUpdatedToSessionUpdate(this.sessionId, event as unknown as ToolUpdatedEvent));
+    this.emitTurn(
+      event.turnId,
+      toolUpdatedToSessionUpdate(this.sessionId, event as unknown as ToolUpdatedEvent),
+    );
   }
 
   private onToolResult(event: AgentEventPayloads['tool.result']): void {
@@ -981,7 +986,7 @@ export class AcpSession {
       // the terminal pane, so the card gets the terminal embed instead of a
       // textual copy. The full output still reached the model (and the
       // persisted wire record) untouched.
-      this.emit({
+      this.emitTurn(event.turnId, {
         sessionId: this.sessionId,
         update: {
           sessionUpdate: 'tool_call_update',
@@ -993,7 +998,8 @@ export class AcpSession {
       });
       return;
     }
-    this.emit(
+    this.emitTurn(
+      event.turnId,
       toolResultToSessionUpdate(this.sessionId, event as unknown as ToolResultEvent, locations),
     );
   }
@@ -1012,7 +1018,7 @@ export class AcpSession {
       if (command.length === 0 || !event.shellCommand.endsWith(command)) continue;
       this.bashCallsAwaitingTerminal.delete(key);
       this.terminalBackedCalls.set(key, event.terminalId);
-      this.emit({
+      this.emitTurn(Number(key.split(':')[0]), {
         sessionId: this.sessionId,
         update: {
           sessionUpdate: 'tool_call_update',
@@ -1117,7 +1123,13 @@ export class AcpSession {
 
   private onTurnEnded(event: AgentEventPayloads['turn.ended']): void {
     const driver = this.driverFor(event.turnId);
-    if (driver === undefined) return;
+    if (driver === undefined) {
+      // Ownerless turn (engine-internal): nothing to settle. Close it out
+      // with the same usage_update owned turns get — it doubles as the
+      // turn-end marker for clients tracking `_meta.turnId`.
+      if (event.stopReason !== 'prompt_only') void this.emitUsageUpdate(event.turnId);
+      return;
+    }
     if (event.stopReason === 'prompt_only') {
       // Context flush, not an answer: the engine appended the queued prompt
       // without an LLM call because a notification turn was pending behind
@@ -1137,7 +1149,7 @@ export class AcpSession {
       }
       driver.resolve({ stopReason: turnEndReasonToStopReason(event.reason, error) });
     });
-    void this.emitUsageUpdate();
+    void this.emitUsageUpdate(event.turnId);
   }
 
   /**
@@ -1149,14 +1161,15 @@ export class AcpSession {
    * vocabulary) when the engine has any; a getUsage failure or an all-zero
    * tally falls back to the plain {used, size} shape.
    */
-  private async emitUsageUpdate(): Promise<void> {
+  private async emitUsageUpdate(turnId?: number): Promise<void> {
     try {
       const size = (await this.klient.global.kosong.listModels()).find(
         (item) => item.model === this.currentModelId,
       )?.max_context_size;
       if (size === undefined) return;
       const context = await this.agent.getContext();
-      this.emit(
+      this.emitTurn(
+        turnId,
         usageUpdateNotification(this.sessionId, context.tokenCount, size, await this.tokenUsage()),
       );
     } catch (error) {
@@ -1223,6 +1236,21 @@ export class AcpSession {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+  }
+
+  /**
+   * Push a turn-scoped `session/update` with the engine's turn id attached as
+   * `update._meta.turnId` (extension). Hosts use it to attribute and merge
+   * streamed work by engine turn — crucial for ownerless turns (background
+   * task notifications), which have no client prompt to key on.
+   */
+  private emitTurn(turnId: number | undefined, notification: SessionNotification | null): void {
+    if (notification === null) return;
+    if (turnId !== undefined) {
+      const update = notification.update as { _meta?: Record<string, unknown> };
+      update._meta = { ...update._meta, turnId };
+    }
+    this.emit(notification);
   }
 
   /**
