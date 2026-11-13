@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        platform: [darwin-arm64, darwin-x64, linux-arm64, linux-x64]
+        platform: [darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64, win32-x64]
     steps:
       - name: Download bundle artifact
         uses: actions/download-artifact@v6
