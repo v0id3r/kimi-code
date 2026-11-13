@@ -347,11 +347,11 @@ export class PreviewChoicePickerComponent extends DockSection implements Focusab
       return;
     }
     if (matchesKey(data, Key.right)) {
-      this.opts.onPreviewScroll?.(1, false);
+      this.opts.onPreviewScroll?.(1, true);
       return;
     }
     if (matchesKey(data, Key.left)) {
-      this.opts.onPreviewScroll?.(-1, false);
+      this.opts.onPreviewScroll?.(-1, true);
       return;
     }
     this.showingNewChoiceFromTop(() => {

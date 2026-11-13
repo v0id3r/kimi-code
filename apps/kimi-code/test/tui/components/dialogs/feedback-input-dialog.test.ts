@@ -186,8 +186,12 @@ describe('promptFeedbackAttachment', () => {
     expect(collapsed).toContain('10 more files · → next page');
 
     dialog.handleInput(`${ESC}[C`);
-    dialog.handleInput(`${ESC}[6~`);
-    dialog.handleInput(`${ESC}[6~`);
+    const secondPage = strip(dialog.render(100).join('\n'));
+    expect(secondPage).toContain('15 files in session.zip · showing 6–10 of 15 session files');
+    expect(secondPage).toContain('agents/main/task-5.jsonl');
+    expect(secondPage).toContain('agents/main/task-9.jsonl');
+
+    dialog.handleInput(`${ESC}[C`);
     const expanded = strip(dialog.render(100).join('\n'));
     expect(expanded).toContain('agents/main/task-10.jsonl');
     expect(expanded).toContain('agents/main/task-14.jsonl');
