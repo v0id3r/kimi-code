@@ -715,7 +715,7 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       .map((u) => u?.content?.text ?? '');
   }
 
-  it('advertises prompt queueing in initialize agent capabilities', async () => {
+  it('advertises native steering in initialize _meta', async () => {
     homeDir = await mkdtemp(join(tmpdir(), 'acp-e2e-turn-'));
     await writeFakeModelConfig(homeDir);
     scripted = createScriptedProvider();
@@ -723,8 +723,101 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     const init = (await client.send('initialize', {
       protocolVersion: 1,
       clientCapabilities: {},
-    })) as { agentCapabilities?: { _meta?: { promptQueueing?: boolean } } };
-    expect(init.agentCapabilities?._meta?.promptQueueing).toBe(true);
+    })) as { _meta?: { steering?: { supported?: boolean; waitForCompletion?: boolean } } };
+    expect(init._meta?.steering?.supported).toBe(true);
+    expect(init._meta?.steering?.waitForCompletion).toBe(true);
+  }, 30_000);
+
+  it('injects a steering prompt into the running turn and settles with it', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const gate = deferred();
+    scripted!.mockNextGatedText('main answer', gate.gate);
+    const prompt1 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'main question' }],
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    // The engine restarts with the injected content: the steered message is
+    // answered by the follow-up turn, and the call settles with ITS stop
+    // reason.
+    scripted!.mockNextText('answer with the steer included');
+    const steerPromise = c.send('_session/steering', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'also consider this' }],
+      waitForCompletion: true,
+    });
+    // Let the engine evaluate the steer while the turn is still running.
+    await sleep(500);
+    gate.release();
+
+    const result1 = (await prompt1) as { stopReason: string };
+    expect(result1.stopReason).toBe('end_turn');
+    const steered = (await steerPromise) as { outcome: string; stopReason: string };
+    expect(steered.outcome).toBe('injected');
+    expect(steered.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+    expect(chunkTexts(c)).toContain('answer with the steer included');
+  }, 30_000);
+
+  it('starts a new turn for a steering prompt while idle', async () => {
+    const c = await boot();
+    scripted!.mockNextText('steer answer');
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const steered = (await c.send('_session/steering', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'question via steering' }],
+      waitForCompletion: true,
+    })) as { outcome: string; stopReason: string };
+    expect(steered.outcome).toBe('startedNewTurn');
+    expect(steered.stopReason).toBe('end_turn');
+    expect(chunkTexts(c)).toContain('steer answer');
+  }, 30_000);
+
+  it('settles an adopted steering call as cancelled on session/cancel', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    // Turn 0 runs gated; the steer wraps it and its follow-up turn starts,
+    // itself gated, with the waiter already adopted onto it.
+    const first = deferred();
+    const second = deferred();
+    scripted!.mockNextGatedText('main answer', first.gate);
+    scripted!.mockNextGatedText('answer with the steer included', second.gate);
+    const prompt1 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'main question' }],
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    const steerPromise = c.send('_session/steering', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'also consider this' }],
+      waitForCompletion: true,
+    });
+    // Wait for the follow-up turn to start (it consumes the second response).
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+
+    c.notify('session/cancel', { sessionId: created.sessionId });
+    const steered = (await steerPromise) as { outcome: string; stopReason: string };
+    expect(steered.outcome).toBe('injected');
+    expect(steered.stopReason).toBe('cancelled');
+
+    first.release();
+    second.release();
+    await prompt1;
   }, 30_000);
 
   it('holds a prompt submitted during an engine-internal turn and answers it once the queue drains', async () => {

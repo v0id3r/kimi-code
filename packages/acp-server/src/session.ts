@@ -54,6 +54,7 @@ import type {
   SessionEventPayloads,
   SessionHandle,
   SkillSummary,
+  SteerResult,
 } from '@moonshot-ai/klient';
 import type { ToolResultEvent } from '@moonshot-ai/agent-core-v2/events';
 import type {
@@ -178,6 +179,27 @@ interface ResolvedCommands {
   readonly skillCommandMap: ReadonlyMap<string, string>;
 }
 
+/** Wire response of the `_session/steering` extension method. */
+export interface SteeringResponse {
+  readonly outcome: 'injected' | 'startedNewTurn';
+  readonly stopReason: string;
+}
+
+/**
+ * Wait-for-completion handle of one `_session/steering` call. Every steer is
+ * tracked by its prompt record id to the turn that actually answers it —
+ * injected steers too, because steering wraps the host turn up early and the
+ * injected content is answered by the follow-up turn (adopt on
+ * `turn.started`, roll a `prompt_only` flush into the next turn).
+ */
+interface SteerWaiter {
+  promptId?: string;
+  turnId?: number;
+  awaitingNextTurn: boolean;
+  settled: boolean;
+  settle: (stopReason: string) => void;
+}
+
 interface TurnDriver {
   resolve(response: PromptResponse): void;
   reject(error: unknown): void;
@@ -258,6 +280,8 @@ export class AcpSession {
   private skills: readonly SkillSummary[] = [];
   /** The in-flight prompt's driver, if any. */
   private driver: TurnDriver | undefined;
+  /** Live wait-for-completion handles of `_session/steering` calls. */
+  private readonly steerWaiters = new Set<SteerWaiter>();
   /**
    * FIFO chain serializing model-bound prompt submissions: each waits for
    * the previous prompt's driver to fully settle before launching, so a
@@ -472,6 +496,9 @@ export class AcpSession {
         driver.resolve({ stopReason: 'cancelled' });
       });
     }
+    for (const waiter of this.steerWaiters) {
+      waiter.settle('cancelled');
+    }
     this.interactionBridge.dispose();
     for (const subscription of this.subscriptions.splice(0)) {
       subscription.dispose();
@@ -619,6 +646,54 @@ export class AcpSession {
     });
     this.promptChain = run.catch(() => undefined);
     return run;
+  }
+
+  /**
+   * ACP `_session/steering`: hand the message to the engine's steer path.
+   * When a turn is running the engine injects the content into it
+   * (`outcome: 'injected'` — the current answer absorbs it at the next step
+   * boundary); otherwise the prompt starts its own turn now or after the
+   * queue drains (`outcome: 'startedNewTurn'`). With `waitForCompletion`
+   * the call settles with that turn's stop reason.
+   */
+  async steer(blocks: readonly ContentBlock[], waitForCompletion: boolean): Promise<SteeringResponse> {
+    const content = await this.preparePromptContent(blocks);
+    if (content === undefined) {
+      // Cancelled while compressing (see `cancel()`).
+      return { outcome: 'startedNewTurn', stopReason: 'cancelled' };
+    }
+    let result: SteerResult;
+    try {
+      result = await this.agent.steer({ input: content });
+    } catch (error) {
+      throw mapPromptLaunchError(error, this.sessionId);
+    }
+    if (result.state === 'blocked') {
+      throw RequestError.invalidRequest({ code: 'prompt.blocked' }, 'the prompt was blocked');
+    }
+    const outcome = result.steered === true ? 'injected' : 'startedNewTurn';
+    if (!waitForCompletion) {
+      return { outcome, stopReason: 'end_turn' };
+    }
+    // Settlement tracks the steered prompt's OWN turn, never the host turn:
+    // steering wraps the host turn up early (the engine restarts with the
+    // injected content), so the answer lands in the follow-up turn — which
+    // `turn.started` hands to us via the prompt record id.
+    return new Promise<SteeringResponse>((resolve) => {
+      const waiter: SteerWaiter = {
+        promptId: result.prompt_id,
+        turnId: undefined,
+        awaitingNextTurn: false,
+        settled: false,
+        settle: (stopReason) => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          this.steerWaiters.delete(waiter);
+          resolve({ outcome, stopReason });
+        },
+      };
+      this.steerWaiters.add(waiter);
+    });
   }
 
   /**
@@ -1092,6 +1167,18 @@ export class AcpSession {
       driver.awaitingResponseTurn = false;
       driver.turnId = event.turnId;
     }
+    for (const waiter of this.steerWaiters) {
+      if (waiter.settled || waiter.turnId !== undefined) continue;
+      if (waiter.promptId !== undefined && event.promptId === waiter.promptId) {
+        waiter.turnId = event.turnId;
+        waiter.awaitingNextTurn = false;
+        continue;
+      }
+      if (waiter.awaitingNextTurn) {
+        waiter.turnId = event.turnId;
+        waiter.awaitingNextTurn = false;
+      }
+    }
   }
 
   /**
@@ -1102,6 +1189,7 @@ export class AcpSession {
    * turn — this event is bookkeeping and `turn.ended` governs settlement.
    */
   private onPromptCompleted(event: AgentEventPayloads['prompt.completed']): void {
+    this.settleSteerWaitersByPrompt(event.promptId, 'end_turn');
     const driver = this.driver;
     if (driver === undefined || driver.settled || driver.promptId === undefined) return;
     if (event.promptId !== driver.promptId) return;
@@ -1111,8 +1199,17 @@ export class AcpSession {
     });
   }
 
+  private settleSteerWaitersByPrompt(promptId: string, stopReason: string): void {
+    for (const waiter of this.steerWaiters) {
+      if (waiter.settled || waiter.promptId !== promptId) continue;
+      if (waiter.turnId !== undefined || waiter.awaitingNextTurn) continue;
+      waiter.settle(stopReason);
+    }
+  }
+
   /** Settle a driver whose queued prompt was cancelled before it ran. */
   private onPromptAborted(event: AgentEventPayloads['prompt.aborted']): void {
+    this.settleSteerWaitersByPrompt(event.promptId, 'cancelled');
     const driver = this.driver;
     if (driver === undefined || driver.settled || driver.promptId === undefined) return;
     if (event.promptId !== driver.promptId) return;
@@ -1122,6 +1219,16 @@ export class AcpSession {
   }
 
   private onTurnEnded(event: AgentEventPayloads['turn.ended']): void {
+    for (const waiter of this.steerWaiters) {
+      if (waiter.settled || waiter.turnId !== event.turnId) continue;
+      if (event.stopReason === 'prompt_only' && waiter.promptId !== undefined) {
+        waiter.turnId = undefined;
+        waiter.awaitingNextTurn = true;
+        continue;
+      }
+      const waiterError = event.error as { readonly code: string; readonly message?: string } | undefined;
+      waiter.settle(turnEndReasonToStopReason(event.reason, waiterError));
+    }
     const driver = this.driverFor(event.turnId);
     if (driver === undefined) {
       // Ownerless turn (engine-internal): nothing to settle. Close it out
@@ -1265,6 +1372,17 @@ export class AcpSession {
     }
     for (const marker of this.chainedPrompts) {
       marker.cancelled = true;
+    }
+    for (const waiter of this.steerWaiters) {
+      if (waiter.promptId !== undefined && waiter.turnId === undefined && !waiter.awaitingNextTurn) {
+        void this.agent.cancelPrompt({ promptId: waiter.promptId }).catch((error) => {
+          log.warn('acp: steered-prompt cancel failed', {
+            sessionId: this.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      waiter.settle('cancelled');
     }
     const driver = this.driver;
     if (driver === undefined || driver.settled) return;

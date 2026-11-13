@@ -41,6 +41,24 @@ interface ScriptedResponse {
   readonly gate?: Promise<void>;
 }
 
+/** Race a gated response against the request abort signal (real providers abort mid-wait). */
+function raceAbort(gate: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return gate;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('aborted'));
+  return Promise.race([
+    gate,
+    new Promise((_, reject) => {
+      signal.addEventListener(
+        'abort',
+        () => {
+          reject(signal.reason ?? new Error('aborted'));
+        },
+        { once: true },
+      );
+    }),
+  ]);
+}
+
 const ZERO_USAGE: TokenUsage = {
   inputOther: 0,
   output: 0,
@@ -64,10 +82,11 @@ class ScriptedStream {
     private readonly parts: readonly StreamedMessagePart[],
     private readonly response: ScriptedResponse,
     private readonly index: number,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
-    if (this.response.gate !== undefined) await this.response.gate;
+    if (this.response.gate !== undefined) await raceAbort(this.response.gate, this.signal);
     for (const part of this.parts) {
       yield part;
     }
@@ -106,7 +125,7 @@ class ScriptedChatProvider {
       );
     }
     this.calls.push(history);
-    return new ScriptedStream(response.parts, response, this.calls.length);
+    return new ScriptedStream(response.parts, response, this.calls.length, options?.signal);
   }
 
   withThinking(): ScriptedChatProvider {
@@ -178,6 +197,10 @@ export function createScriptedProvider(): ScriptedProvider {
         }
         control.onEvent?.({ type: 'llm.done' });
       } catch (error) {
+        // An abort must surface to the engine as a cancellation (what a real
+        // provider does), not get masked as a remote failure — otherwise a
+        // cancelled turn reports reason 'failed' instead of 'cancelled'.
+        if (control.signal.aborted) throw error;
         control.onEvent?.({
           type: 'llm.failed.remote',
           error: {

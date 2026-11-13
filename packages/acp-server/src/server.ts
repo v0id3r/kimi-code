@@ -27,6 +27,7 @@ import {
   type AuthenticateResponse,
   type CancelNotification,
   type ClientCapabilities,
+  type ContentBlock,
   type CloseSessionRequest,
   type CloseSessionResponse,
   type DeleteSessionRequest,
@@ -72,7 +73,7 @@ import { buildTerminalAuthMethod, TERMINAL_AUTH_METHOD } from './auth-methods';
 import { acpMcpServersToConfigRecord } from './convert';
 import { log } from './log';
 import { isAcpModeId } from './modes';
-import { AcpSession } from './session';
+import { AcpSession, type SteeringResponse } from './session';
 import { negotiateVersion } from './version';
 
 /**
@@ -222,12 +223,6 @@ export class AcpServer {
       // is not supported (dropped with a warning — see `./convert`).
       mcpCapabilities: { http: true, sse: true },
       auth: { logout: {} },
-      _meta: {
-        // Prompts submitted while a turn runs are accepted and queued (the
-        // adapter tracks them by client-chosen promptId to the turn that
-        // actually answers) — hosts may type ahead with plain session/prompt.
-        promptQueueing: true,
-      },
     };
 
     return {
@@ -242,7 +237,13 @@ export class AcpServer {
           : TERMINAL_AUTH_METHOD,
       ],
       ...(this.agentInfo ? { agentInfo: this.agentInfo } : {}),
-      _meta: { [SYSTEM_PROMPT_APPEND_META]: true },
+      _meta: {
+        [SYSTEM_PROMPT_APPEND_META]: true,
+        // `_session/steering` is implemented: a prompt sent mid-turn is
+        // injected into the running turn (or starts its own when idle) and
+        // the call settles with that turn's stop reason.
+        steering: { supported: true, waitForCompletion: true },
+      },
     };
   }
 
@@ -443,6 +444,22 @@ export class AcpServer {
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
+  }
+
+  /**
+   * Handle the `_session/steering` extension request (advertised in
+   * `initialize._meta.steering`). Unknown sessions map to invalid_params like
+   * `session/prompt`.
+   */
+  async steering(params: SteeringRequest, signal?: AbortSignal): Promise<SteeringResponse> {
+    const acpSession = this.sessions.get(params.sessionId);
+    if (!acpSession) {
+      throw RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+    }
+    if (signal !== undefined && signal.aborted) {
+      acpSession.cancel();
+    }
+    return acpSession.steer(params.prompt, params.waitForCompletion === true);
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -674,6 +691,9 @@ export class AcpServer {
 /** The custom ACP method name for per-session model selection. */
 const SET_SESSION_MODEL_METHOD = 'session/set_model';
 
+/** The custom ACP extension method for mid-turn message injection. */
+const SESSION_STEERING_METHOD = '_session/steering';
+
 /**
  * `initialize._meta` key advertising that session `_meta.systemPrompt` is
  * appended to the native system prompt, so hosts can feature-detect it.
@@ -687,6 +707,24 @@ const SYSTEM_PROMPT_APPEND_META = 'jaz.dev/systemPromptAppend';
 function systemPromptAppend(meta: Record<string, unknown> | null | undefined): string | undefined {
   const value = meta?.['systemPrompt'];
   return typeof value === 'string' ? value.trim() || undefined : undefined;
+}
+
+/** Parsed params of the custom `_session/steering` request. */
+export interface SteeringRequest {
+  readonly sessionId: string;
+  readonly prompt: readonly ContentBlock[];
+  readonly waitForCompletion?: boolean;
+}
+
+function parseSteeringParams(params: unknown): SteeringRequest {
+  const { sessionId, prompt, waitForCompletion } = (params ?? {}) as Record<string, unknown>;
+  if (typeof sessionId !== 'string' || !Array.isArray(prompt)) {
+    throw RequestError.invalidParams(
+      params,
+      '_session/steering expects { sessionId: string, prompt: ContentBlock[] }',
+    );
+  }
+  return { sessionId, prompt: prompt as ContentBlock[], waitForCompletion: waitForCompletion === true };
 }
 
 /** Parsed params of the custom `session/set_model` request. */
@@ -752,6 +790,9 @@ export function createAcpAgentApp(getServer: () => AcpServer | Promise<AcpServer
     )
     .onRequest(SET_SESSION_MODEL_METHOD, parseSetSessionModelParams, async (ctx) =>
       (await getServer()).setSessionModel(ctx.params),
+    )
+    .onRequest(SESSION_STEERING_METHOD, parseSteeringParams, async (ctx) =>
+      (await getServer()).steering(ctx.params, ctx.signal),
     );
 }
 
