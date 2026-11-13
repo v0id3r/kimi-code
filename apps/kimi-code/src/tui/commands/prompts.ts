@@ -13,10 +13,15 @@ import type {
 } from '@moonshot-ai/kimi-code-oauth';
 
 import { ApiKeyInputDialogComponent, type ApiKeyInputResult } from '../components/dialogs/api-key-input-dialog';
-import { ChoicePickerComponent, type ChoiceOption } from '../components/dialogs/choice-picker';
+import {
+  ChoicePickerComponent,
+  PreviewChoicePickerComponent,
+  type ChoiceOption,
+} from '../components/dialogs/choice-picker';
 import { FeedbackInputDialogComponent, type FeedbackInputDialogResult } from '../components/dialogs/feedback-input-dialog';
 import { ModelSelectorComponent } from '../components/dialogs/model-selector';
 import { PlatformSelectorComponent } from '../components/dialogs/platform-selector';
+import { DOCK_PREVIEW_ROWS } from '../constant/rendering';
 import type { SlashCommandHost } from './dispatch';
 
 export function promptPlatformSelection(host: SlashCommandHost): Promise<string | undefined> {
@@ -80,8 +85,7 @@ const FEEDBACK_ATTACHMENT_OPTIONS: readonly ChoiceOption[] = [
   {
     value: 'logs',
     label: 'Logs only',
-    description:
-      'Upload session.zip (session directory files including wire.jsonl, state.json, attachments, plan/task outputs, and manifest.json, excluding file-history snapshots; plus session and global logs)',
+    description: 'Upload session.zip with the current session files listed below',
   },
   {
     value: 'logs+codebase',
@@ -92,31 +96,77 @@ const FEEDBACK_ATTACHMENT_OPTIONS: readonly ChoiceOption[] = [
   },
 ];
 
-function buildFeedbackDisclosureMarkdown(sessionDir?: string): string {
-  const lines = [
-    'The following data will be submitted for troubleshooting:',
-    '- Feedback note and metadata (`session_id`, `request_id`, active model, CLI version, OS, shell)',
-    '- `session.zip`: session directory contents (`wire.jsonl` conversation and tool results, `state.json`, session attachments, plan/task artifacts, `logs/kimi-code.log`, and `manifest.json`, excluding `file-history` snapshots) plus `logs/global/kimi-code.log`',
-  ];
-  if (sessionDir !== undefined && sessionDir.length > 0) {
-    lines.push(`- Local session directory: \`${sessionDir}\``);
-  }
-  return lines.join('\n');
+export interface FeedbackSessionPreview {
+  readonly sessionId: string;
+  readonly sessionDir: string;
+  readonly entries: readonly string[];
 }
 
 export function promptFeedbackAttachment(
   host: SlashCommandHost,
   excludeCodebase = false,
-  sessionDir?: string,
+  session?: FeedbackSessionPreview,
 ): Promise<FeedbackAttachmentLevel | undefined> {
   const options = excludeCodebase
     ? FEEDBACK_ATTACHMENT_OPTIONS.filter((option) => option.value !== 'logs+codebase')
     : FEEDBACK_ATTACHMENT_OPTIONS;
+  let expanded = false;
+  let scroll = 0;
   return new Promise((resolve) => {
-    const picker = new ChoicePickerComponent({
+    const picker = new PreviewChoicePickerComponent({
       title: 'Share diagnostic info to help us investigate?',
-      notice: { markdown: buildFeedbackDisclosureMarkdown(sessionDir) },
+      notice:
+        'The following data will be submitted for troubleshooting:\n' +
+        '- Feedback note and metadata (`session_id`, `request_id`, active model, CLI version, OS, shell)\n' +
+        '- `session.zip`: every file in the selected session is listed below. `file-history` snapshots are excluded.\n' +
+        '- `global/`: shared application logs, which may mention other sessions.',
       options,
+      layout:
+        host.state.dockContainer === undefined ? undefined : { maxBodyRows: DOCK_PREVIEW_ROWS },
+      previewLabel:
+        session === undefined ? ' session.zip' : ` ${session.sessionId} · ${session.sessionDir}`,
+      onPreviewPage: (direction) => {
+        scroll += direction * 10;
+      },
+      preview: {
+        render: () => {
+          if (session === undefined)
+            return [
+              '  File list unavailable; the session archive will be prepared again for upload.',
+            ];
+          const global = session.entries.filter((entry) => entry.startsWith('logs/global/'));
+          const files = session.entries.filter((entry) => !entry.startsWith('logs/global/'));
+          const visible = expanded ? files : files.slice(0, 12);
+          const hidden = expanded ? 0 : files.length - visible.length;
+          const maxScroll = Math.max(0, visible.length - 10);
+          scroll = Math.max(0, Math.min(scroll, maxScroll));
+          const shown = expanded ? visible.slice(scroll, scroll + 10) : visible;
+          return [
+            `  ${session.sessionId}/ (${String(files.length)} files${hidden > 0 ? `, ${String(hidden)} more` : ''})`,
+            ...shown.map((entry) => `  ${session.sessionId}/${entry}`),
+            ...(expanded && maxScroll > 0
+              ? [
+                  `  Files ${String(scroll + 1)}–${String(scroll + shown.length)}/${String(files.length)} · PgUp/PgDn scroll`,
+                ]
+              : []),
+            ...(hidden > 0 ? ['  Tab show all files'] : []),
+            ...(expanded ? ['  Tab collapse files'] : []),
+            '',
+            '  global/ (shared application logs; may mention other sessions)',
+            ...global.map((entry) => `  global/${entry.slice('logs/global/'.length)}`),
+          ];
+        },
+        invalidate: () => {},
+        dispose: () => {},
+      },
+      onPreviewToggle:
+        session === undefined || session.entries.length <= 12
+          ? undefined
+          : () => {
+              expanded = !expanded;
+              scroll = 0;
+              return true;
+            },
       onSelect: (value) => {
         host.restoreEditor();
         resolve(value as FeedbackAttachmentLevel);

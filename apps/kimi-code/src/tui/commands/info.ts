@@ -25,8 +25,11 @@ import {
 import { DEFAULT_OAUTH_PROVIDER_NAME, isManagedUsageProvider } from '../constant/kimi-tui';
 import {
   collectFeedbackRequestInfo,
+  discardFeedbackSessionArchive,
+  prepareFeedbackSessionArchive,
   resolveCurrentSessionDir,
   submitFeedbackWithAttachments,
+  type PreparedFeedbackSessionArchive,
 } from '../../feedback/feedback-attachments';
 import { formatErrorMessage } from '../utils/event-payload';
 import { sessionWorkDir } from '../utils/session-work-dir';
@@ -87,68 +90,94 @@ export async function handleFeedbackCommand(host: SlashCommandHost): Promise<voi
     );
   }
   const sessionDir = await resolveCurrentSessionDir(host);
-  const level =
-    sessionDir === undefined
-      ? await promptFeedbackAttachment(host, remoteSession)
-      : await promptFeedbackAttachment(host, remoteSession, sessionDir);
-  if (level === undefined) {
-    host.showStatus(FEEDBACK_STATUS_CANCELLED);
-    return;
+  let preparedSession: PreparedFeedbackSessionArchive | undefined;
+  if (sessionDir !== undefined) {
+    try {
+      preparedSession = await prepareFeedbackSessionArchive(host);
+    } catch (error) {
+      host.showError(`Could not prepare the session file list: ${formatErrorMessage(error)}`);
+    }
   }
-
-  const feedbackInfo = await collectFeedbackRequestInfo(
-    sessionDir,
-    host.state.appState.feedbackRequestIds,
-  );
-  const version = withFeedbackVersionPrefix(host.state.appState.version);
-  const spinner = host.showLoginProgressSpinner(FEEDBACK_STATUS_SUBMITTING);
-  // Guarantee the spinner's underlying setInterval is always cleared, even when
-  // submitFeedback throws — otherwise the interval (and its per-frame
-  // requestRender) leaks for the rest of the session.
-  let stopped = false;
-  const stopSpinner = (opts: { ok: boolean; label: string }): void => {
-    if (stopped) return;
-    stopped = true;
-    spinner.stop(opts);
-  };
   try {
-    const res = await host.harness.auth.submitFeedback({
-      content: input.value,
-      sessionId: host.state.appState.sessionId,
-      version,
-      os: `${osType()} ${osRelease()}`,
-      model: host.state.appState.model.length > 0 ? host.state.appState.model : null,
-      info: feedbackInfo,
-    });
-
-    if (res.kind !== 'ok') {
-      stopSpinner({ ok: false, label: res.message });
-      fallback(FEEDBACK_STATUS_FALLBACK);
+    const level = await promptFeedbackAttachment(
+      host,
+      remoteSession,
+      preparedSession === undefined
+        ? undefined
+        : {
+            sessionId: host.state.appState.sessionId,
+            sessionDir: preparedSession.sessionDir,
+            entries: preparedSession.entries,
+          },
+    );
+    if (level === undefined) {
+      host.showStatus(FEEDBACK_STATUS_CANCELLED);
       return;
     }
 
-    // Stage 3: prepare and upload each requested attachment independently.
-    // Attachment failures are non-fatal partial failures — the text feedback
-    // already exists server-side — so a throw here degrades to the
-    // partial-failure status, never to the GitHub fallback in the outer catch.
-    let attachmentFailed = false;
+    const feedbackInfo = await collectFeedbackRequestInfo(
+      sessionDir,
+      host.state.appState.feedbackRequestIds,
+    );
+    const version = withFeedbackVersionPrefix(host.state.appState.version);
+    const spinner = host.showLoginProgressSpinner(FEEDBACK_STATUS_SUBMITTING);
+    // Guarantee the spinner's underlying setInterval is always cleared, even when
+    // submitFeedback throws — otherwise the interval (and its per-frame
+    // requestRender) leaks for the rest of the session.
+    let stopped = false;
+    const stopSpinner = (opts: { ok: boolean; label: string }): void => {
+      if (stopped) return;
+      stopped = true;
+      spinner.stop(opts);
+    };
     try {
-      attachmentFailed = await submitFeedbackWithAttachments(host, res.feedbackId, level, sessionDir);
-    } catch {
-      attachmentFailed = true;
-    }
+      const res = await host.harness.auth.submitFeedback({
+        content: input.value,
+        sessionId: host.state.appState.sessionId,
+        version,
+        os: `${osType()} ${osRelease()}`,
+        model: host.state.appState.model.length > 0 ? host.state.appState.model : null,
+        info: feedbackInfo,
+      });
 
-    stopSpinner({ ok: true, label: FEEDBACK_STATUS_SUCCESS });
-    host.showStatus(feedbackSessionLine(host.state.appState.sessionId));
-    host.showStatus(feedbackIdLine(res.feedbackId));
-    host.track(FEEDBACK_TELEMETRY_EVENT);
-    if (attachmentFailed) {
-      host.showStatus(FEEDBACK_STATUS_UPLOAD_FAILED);
+      if (res.kind !== 'ok') {
+        stopSpinner({ ok: false, label: res.message });
+        fallback(FEEDBACK_STATUS_FALLBACK);
+        return;
+      }
+
+      // Stage 3: prepare and upload each requested attachment independently.
+      // Attachment failures are non-fatal partial failures — the text feedback
+      // already exists server-side — so a throw here degrades to the
+      // partial-failure status, never to the GitHub fallback in the outer catch.
+      let attachmentFailed = false;
+      try {
+        attachmentFailed = await submitFeedbackWithAttachments(
+          host,
+          res.feedbackId,
+          level,
+          preparedSession,
+        );
+      } catch {
+        attachmentFailed = true;
+      }
+
+      stopSpinner({ ok: true, label: FEEDBACK_STATUS_SUCCESS });
+      host.showStatus(feedbackSessionLine(host.state.appState.sessionId));
+      host.showStatus(feedbackIdLine(res.feedbackId));
+      host.track(FEEDBACK_TELEMETRY_EVENT);
+      if (attachmentFailed) {
+        host.showStatus(FEEDBACK_STATUS_UPLOAD_FAILED);
+      }
+    } catch (error) {
+      stopSpinner({ ok: false, label: FEEDBACK_STATUS_NETWORK_ERROR });
+      fallback(FEEDBACK_STATUS_FALLBACK);
+      throw error;
     }
-  } catch (error) {
-    stopSpinner({ ok: false, label: FEEDBACK_STATUS_NETWORK_ERROR });
-    fallback(FEEDBACK_STATUS_FALLBACK);
-    throw error;
+  } finally {
+    if (preparedSession !== undefined) {
+      await discardFeedbackSessionArchive(preparedSession);
+    }
   }
 }
 

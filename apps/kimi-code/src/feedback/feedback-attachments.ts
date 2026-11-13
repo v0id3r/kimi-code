@@ -31,25 +31,54 @@ const CODEBASE_SCAN_TIMEOUT_MS = 3000;
  * Returns `true` when at least one requested attachment failed so the caller
  * can surface a partial-failure status.
  */
+export interface PreparedFeedbackSessionArchive extends FeedbackArchive {
+  readonly entries: readonly string[];
+  readonly sessionDir: string;
+  readonly cleanupDir: string;
+}
+
+export async function prepareFeedbackSessionArchive(
+  host: SlashCommandHost,
+): Promise<PreparedFeedbackSessionArchive> {
+  return prepareFeedbackArchive(SESSION_ARCHIVE_FILENAME, async (archivePath) => {
+    const exported = await host.harness.exportSession({
+      id: host.state.appState.sessionId,
+      outputPath: archivePath,
+      includeGlobalLog: true,
+      version: host.state.appState.version,
+      installSource: await detectInstallSource(),
+      shellEnv: detectShellEnvironment(),
+    });
+    return {
+      ...(await archiveFromExportedSession(archivePath)),
+      entries: exported.entries,
+      sessionDir: exported.sessionDir,
+    };
+  });
+}
+
+export async function discardFeedbackSessionArchive(
+  archive: PreparedFeedbackSessionArchive,
+): Promise<void> {
+  await rm(archive.cleanupDir, { recursive: true, force: true }).catch(() => {});
+}
+
 export async function submitFeedbackWithAttachments(
   host: SlashCommandHost,
   feedbackId: number,
   level: FeedbackAttachmentLevel,
-  knownSessionDir?: string,
+  preparedSession?: PreparedFeedbackSessionArchive,
 ): Promise<boolean> {
   const api = createFeedbackUploadApi(host);
 
   if (level === 'logs') {
-    const uploaded = await prepareAndUploadSessionArchive(host, api, feedbackId, knownSessionDir);
+    const uploaded = await prepareAndUploadSessionArchive(host, api, feedbackId, preparedSession);
     return !uploaded;
   }
   if (level === 'logs+codebase') {
-    const [sessionDir, scan] = await Promise.all([
-      knownSessionDir ?? resolveCurrentSessionDir(host),
-      scanCodebaseForFeedback(host.state.appState.workDir),
-    ]);
+    const scan = await scanCodebaseForFeedback(host.state.appState.workDir);
     const [uploadedSession, uploadedCodebase] = await Promise.all([
-      prepareAndUploadSessionArchive(host, api, feedbackId, sessionDir),
+      prepareAndUploadSessionArchive(host, api, feedbackId, preparedSession),
       prepareAndUploadCodebaseArchive(api, feedbackId, scan),
     ]);
     return !uploadedSession || !uploadedCodebase;
@@ -61,24 +90,14 @@ async function prepareAndUploadSessionArchive(
   host: SlashCommandHost,
   api: FeedbackUploadUrlApi,
   feedbackId: number,
-  knownSessionDir?: string,
+  preparedSession?: PreparedFeedbackSessionArchive,
 ): Promise<boolean> {
-  const sessionDir = knownSessionDir ?? (await resolveCurrentSessionDir(host));
-  if (sessionDir === undefined) {
-    await logFeedbackUploadError(new Error('cannot locate the current session directory'));
-    return false;
-  }
-  return uploadProducedArchive(api, feedbackId, SESSION_ARCHIVE_FILENAME, async (archivePath) => {
-    const exported = await host.harness.exportSession({
-      id: host.state.appState.sessionId,
-      outputPath: archivePath,
-      includeGlobalLog: true,
-      version: host.state.appState.version,
-      installSource: await detectInstallSource(),
-      shellEnv: detectShellEnvironment(),
-    });
-    return archiveFromExportedSession(exported.zipPath);
-  });
+  return uploadPreparedArchive(
+    api,
+    feedbackId,
+    SESSION_ARCHIVE_FILENAME,
+    preparedSession ?? prepareFeedbackSessionArchive(host),
+  );
 }
 
 async function prepareAndUploadCodebaseArchive(
@@ -106,21 +125,50 @@ async function uploadProducedArchive(
   filename: string,
   produce: (archivePath: string) => Promise<FeedbackArchive>,
 ): Promise<boolean> {
-  let cleanupDir: string | undefined;
+  return uploadPreparedArchive(
+    api,
+    feedbackId,
+    filename,
+    prepareFeedbackArchive(filename, produce),
+  );
+}
+
+async function prepareFeedbackArchive<T extends FeedbackArchive>(
+  filename: string,
+  produce: (archivePath: string) => Promise<T>,
+): Promise<T & { readonly cleanupDir: string }> {
+  const target = await createFeedbackArchivePath(filename);
   try {
-    const target = await createFeedbackArchivePath(filename);
-    cleanupDir = target.cleanupDir;
     const archive = await produce(target.archivePath);
-    await uploadArchive(api, { ...archive, cleanupDir: target.cleanupDir }, feedbackId, {
-      filename,
-    });
+    return { ...archive, cleanupDir: target.cleanupDir };
+  } catch (error) {
+    await rm(target.cleanupDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function uploadPreparedArchive(
+  api: FeedbackUploadUrlApi,
+  feedbackId: number,
+  filename: string,
+  pending: FeedbackArchive | Promise<FeedbackArchive>,
+): Promise<boolean> {
+  let archive: FeedbackArchive;
+  try {
+    archive = await pending;
+  } catch (error) {
+    await logFeedbackUploadError(error);
+    return false;
+  }
+  try {
+    await uploadArchive(api, archive, feedbackId, { filename });
     return true;
   } catch (error) {
     await logFeedbackUploadError(error);
     return false;
   } finally {
-    if (cleanupDir !== undefined) {
-      await rm(cleanupDir, { recursive: true, force: true }).catch(() => {});
+    if (archive.cleanupDir !== undefined) {
+      await rm(archive.cleanupDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 }

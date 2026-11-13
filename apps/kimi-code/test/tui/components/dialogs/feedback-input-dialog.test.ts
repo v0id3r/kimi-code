@@ -1,4 +1,4 @@
-import { visibleWidth, type Component } from '@moonshot-ai/pi-tui';
+import { visibleWidth, type Component, type Focusable } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -127,9 +127,20 @@ describe('promptFeedbackAttachment', () => {
         mounted = component;
       },
       restoreEditor: vi.fn(),
+      state: { dockContainer: undefined },
     };
 
-    void promptFeedbackAttachment(host as never, false, '/tmp/sessions/ses-42');
+    void promptFeedbackAttachment(host as never, false, {
+      sessionId: 'ses-42',
+      sessionDir: '/tmp/sessions/ses-42',
+      entries: [
+        'manifest.json',
+        'agents/main/wire.jsonl',
+        'state.json',
+        'logs/kimi-code.log',
+        'logs/global/kimi-code.log',
+      ],
+    });
     expect(mounted).toBeDefined();
     const rendered = strip(mounted!.render(100).join('\n'));
 
@@ -140,13 +151,49 @@ describe('promptFeedbackAttachment', () => {
     expect(rendered).toContain('session_id');
     expect(rendered).toContain('request_id');
     expect(rendered).toContain('session.zip');
-    expect(rendered).toContain('wire.jsonl');
-    expect(rendered).toContain('state.json');
+    expect(rendered).toContain('ses-42/agents/main/wire.jsonl');
+    expect(rendered).toContain('ses-42/state.json');
     expect(rendered).toContain('manifest.json');
     expect(rendered).toContain('file-history');
-    expect(rendered).toContain('logs/global/kimi-code.log');
+    expect(rendered).toContain('global/kimi-code.log');
     expect(rendered).toContain('.example/.sample/.template');
     expect(rendered).toContain('/tmp/sessions/ses-42');
+  });
+
+  it('expands and pages through every current-session file', () => {
+    let mounted: (Component & Focusable) | undefined;
+    const host = {
+      mountEditorReplacement: (component: Component & Focusable) => {
+        mounted = component;
+      },
+      restoreEditor: vi.fn(),
+      state: { dockContainer: undefined },
+    };
+    const entries = Array.from(
+      { length: 15 },
+      (_, index) => `agents/main/task-${String(index)}.jsonl`,
+    );
+    void promptFeedbackAttachment(host as never, false, {
+      sessionId: 'ses-42',
+      sessionDir: '/tmp/sessions/ses-42',
+      entries,
+    });
+    expect(mounted).toBeDefined();
+    const dialog = mounted as Component & Focusable & { handleInput: (data: string) => void };
+    const collapsed = strip(dialog.render(100).join('\n'));
+    expect(collapsed).toContain('ses-42/agents/main/task-0.jsonl');
+    expect(collapsed).not.toContain('ses-42/agents/main/task-12.jsonl');
+    expect(collapsed).toContain('3 more');
+
+    dialog.handleInput('\t');
+    dialog.handleInput(`${ESC}[6~`);
+    const expanded = strip(dialog.render(100).join('\n'));
+    expect(expanded).toContain('ses-42/agents/main/task-10.jsonl');
+    expect(expanded).toContain('ses-42/agents/main/task-14.jsonl');
+    expect(expanded).toContain('Files 6–15/15');
+    for (const width of [100, 40, 20]) {
+      expect(dialog.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+    }
   });
 
   it('offers only Logs only on remote sessions', () => {
@@ -156,6 +203,7 @@ describe('promptFeedbackAttachment', () => {
         mounted = component;
       },
       restoreEditor: vi.fn(),
+      state: { dockContainer: undefined },
     };
 
     void promptFeedbackAttachment(host as never, true);
