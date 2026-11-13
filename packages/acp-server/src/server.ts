@@ -7,6 +7,7 @@ import {
   type AuthenticateResponse,
   type CancelNotification,
   type ClientCapabilities,
+  type ContentBlock,
   type CloseSessionRequest,
   type CloseSessionResponse,
   type DeleteSessionRequest,
@@ -52,7 +53,7 @@ import { buildTerminalAuthMethod, TERMINAL_AUTH_METHOD } from './auth-methods';
 import { acpMcpServersToConfigRecord } from './convert';
 import { log } from './log';
 import { isAcpModeId } from './modes';
-import { AcpSession } from './session';
+import { AcpSession, type SteeringResponse } from './session';
 import { negotiateVersion } from './version';
 
 const SESSION_NOT_FOUND_CODE = 40404;
@@ -149,9 +150,6 @@ export class AcpServer {
       },
       mcpCapabilities: { http: true, sse: true },
       auth: { logout: {} },
-      _meta: {
-        promptQueueing: true,
-      },
     };
 
     return {
@@ -166,7 +164,10 @@ export class AcpServer {
           : TERMINAL_AUTH_METHOD,
       ],
       ...(this.agentInfo ? { agentInfo: this.agentInfo } : {}),
-      _meta: { [SYSTEM_PROMPT_APPEND_META]: true },
+      _meta: {
+        [SYSTEM_PROMPT_APPEND_META]: true,
+        steering: { supported: true, waitForCompletion: true },
+      },
     };
   }
 
@@ -314,6 +315,17 @@ export class AcpServer {
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
+  }
+
+  async steering(params: SteeringRequest, signal?: AbortSignal): Promise<SteeringResponse> {
+    const acpSession = this.sessions.get(params.sessionId);
+    if (!acpSession) {
+      throw RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+    }
+    if (signal !== undefined && signal.aborted) {
+      acpSession.cancel();
+    }
+    return acpSession.steer(params.prompt, params.waitForCompletion === true);
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -490,11 +502,30 @@ export class AcpServer {
 
 const SET_SESSION_MODEL_METHOD = 'session/set_model';
 
+const SESSION_STEERING_METHOD = '_session/steering';
+
 const SYSTEM_PROMPT_APPEND_META = 'jaz.dev/systemPromptAppend';
 
 function systemPromptAppend(meta: Record<string, unknown> | null | undefined): string | undefined {
   const value = meta?.['systemPrompt'];
   return typeof value === 'string' ? value.trim() || undefined : undefined;
+}
+
+export interface SteeringRequest {
+  readonly sessionId: string;
+  readonly prompt: readonly ContentBlock[];
+  readonly waitForCompletion?: boolean;
+}
+
+function parseSteeringParams(params: unknown): SteeringRequest {
+  const { sessionId, prompt, waitForCompletion } = (params ?? {}) as Record<string, unknown>;
+  if (typeof sessionId !== 'string' || !Array.isArray(prompt)) {
+    throw RequestError.invalidParams(
+      params,
+      '_session/steering expects { sessionId: string, prompt: ContentBlock[] }',
+    );
+  }
+  return { sessionId, prompt: prompt as ContentBlock[], waitForCompletion: waitForCompletion === true };
 }
 
 export interface SetSessionModelParams {
@@ -541,6 +572,9 @@ export function createAcpAgentApp(getServer: () => AcpServer | Promise<AcpServer
     )
     .onRequest(SET_SESSION_MODEL_METHOD, parseSetSessionModelParams, async (ctx) =>
       (await getServer()).setSessionModel(ctx.params),
+    )
+    .onRequest(SESSION_STEERING_METHOD, parseSteeringParams, async (ctx) =>
+      (await getServer()).steering(ctx.params, ctx.signal),
     );
 }
 
