@@ -15,8 +15,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { getLiveSessionById, IAgentLifecycleService, IEventBus } from '@moonshot-ai/agent-core-v2';
+import { IAgentLoopService } from '@moonshot-ai/agent-core-v2/agent/loop/loop';
+import type { PromptOrigin } from '@moonshot-ai/agent-core-v2/agent/contextMemory/types';
 import { ToolUpdated } from '@moonshot-ai/agent-core-v2/agent/toolExecutor/toolExecutorEvents';
-import { afterEach, describe, expect, it } from 'vitest';
+import { createUserEntry } from '@moonshot-ai/agent-core-v2/human/agent/turn';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { mapPromptLaunchError } from '../src/session';
 import { createTestClient, type TestClient } from './_helpers/acpClient';
@@ -291,10 +294,11 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     expect(history).toContain('\\"Pick many\\":\\"X, Z\\"');
   }, 30_000);
 
-  it('rejects a second prompt while a turn is in flight', async () => {
+  it('queues a second prompt behind a turn parked at an approval and answers it after', async () => {
     const c = await boot();
     // First model response parks the turn at a Bash approval; the follow-up
-    // text closes the turn once the approval lands.
+    // text closes the turn once the approval lands. The third response
+    // serves the queued second prompt.
     scripted!.mockNextResponse({
       type: 'function',
       id: 'call_busy',
@@ -302,6 +306,7 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       arguments: '{"command":"echo busy_probe"}',
     });
     scripted!.mockNextText('done');
+    scripted!.mockNextText('second answer');
 
     // Park the approval until the test releases it.
     let answerPermission: ((response: unknown) => void) | undefined;
@@ -326,21 +331,28 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     // The turn is in flight once its approval reached the client.
     await permissionSeen;
 
-    // A second prompt while the turn runs must fail fast with -32600, not
-    // silently queue behind the engine and overwrite the in-flight driver.
-    await expect(
-      c.send('session/prompt', {
-        sessionId: created.sessionId,
-        prompt: [{ type: 'text', text: 'again' }],
-      }),
-    ).rejects.toThrow(/another turn is already in progress/);
+    // A second prompt while the turn runs waits in the local submission
+    // chain — no rejection, no silent engine queue behind an in-flight
+    // driver.
+    const secondPrompt = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'again' }],
+    });
+    const early = await Promise.race([
+      secondPrompt.then(() => 'settled' as const),
+      sleep(500).then(() => 'pending' as const),
+    ]);
+    expect(early).toBe('pending');
 
     // Release the parked approval: the first turn completes normally and its
-    // prompt settles with end_turn (the driver was never displaced).
+    // prompt settles with end_turn, then the queued prompt runs its own turn.
     answerPermission!({ outcome: { outcome: 'selected', optionId: 'approve_once' } });
     const result = (await firstPrompt) as { stopReason: string };
     expect(result.stopReason).toBe('end_turn');
-    expect(scripted!.callCount()).toBe(2);
+    const second = (await secondPrompt) as { stopReason: string };
+    expect(second.stopReason).toBe('end_turn');
+    expect(scripted!.callCount()).toBe(3);
+    expect(chunkTexts(c)).toContain('second answer');
   }, 30_000);
 
   it('settles as cancelled when cancel arrives while the launch is in flight', async () => {
@@ -660,6 +672,189 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     ).toBe(true);
     // …while the stdout progress never crossed the wire.
     expect(updates.some((u) => u?.title === 'raw-stdout-bytes')).toBe(false);
+  }, 30_000);
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  function deferred(): { gate: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { gate, release };
+  }
+
+  /**
+   * Inject an engine-internal notification entry (the background-task
+   * completion path's shape) straight into the main agent's loop, bypassing
+   * ACP — this is how internal turns start without any client prompt.
+   */
+  function injectNotification(c: TestClient, sessionId: string, promptId: string, text: string): void {
+    const session = getLiveSessionById(c.server.core.accessor, sessionId);
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).handleOf('main');
+    const loop = agentHandle?.accessor.get(IAgentLoopService);
+    expect(loop).toBeDefined();
+    loop!.notify(
+      createUserEntry(
+        { role: 'user', content: [{ type: 'text', text }] },
+        { promptId, origin: { kind: 'injection', variant: 'test_notification' } as PromptOrigin },
+      ),
+    );
+  }
+
+  /** Text of every agent_message_chunk received so far, in arrival order. */
+  function chunkTexts(c: TestClient): string[] {
+    return c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update)
+      .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+      .map((u) => u?.content?.text ?? '');
+  }
+
+  it('holds a prompt submitted during an engine-internal turn and answers it once the queue drains', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    // An engine-internal turn (background-task notification) holding its LLM
+    // call on a gate, with NO ACP prompt owning it.
+    const first = deferred();
+    scripted!.mockNextGatedText('notification turn work', first.gate);
+    injectNotification(c, created.sessionId, 'task:test:completed', '<notification>task done</notification>');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    // Submitted while the engine is busy: the engine queues this prompt, so
+    // the ACP call must stay open — the old behavior settled it instantly
+    // with a silent `end_turn`.
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'user question' }],
+    });
+    const early = await Promise.race([
+      promptPromise.then(() => 'settled' as const),
+      sleep(500).then(() => 'pending' as const),
+    ]);
+    expect(early).toBe('pending');
+
+    scripted!.mockNextText('answer after the queue');
+    first.release();
+
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+
+    const texts = chunkTexts(c);
+    // The ownerless internal turn streamed to the client too, ahead of the
+    // queued prompt's own answer.
+    expect(texts.indexOf('notification turn work')).toBeGreaterThanOrEqual(0);
+    expect(texts.indexOf('answer after the queue')).toBeGreaterThan(texts.indexOf('notification turn work'));
+  }, 30_000);
+
+  it('rolls a prompt_only flush into the follow-up notification turn instead of settling empty', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('notify one work', first.gate);
+    injectNotification(c, created.sessionId, 'task:one:completed', '<notification>one</notification>');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    // Queued behind the running turn; give the submission a moment to land
+    // in the engine's queue before the second notification…
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'queued user question' }],
+    });
+    await sleep(500);
+    // …which lands behind the queued prompt and makes the drain flush the
+    // prompt as prompt_only (context append, no LLM call): the follow-up
+    // notification turn is the one that answers it.
+    injectNotification(c, created.sessionId, 'task:two:completed', '<notification>two</notification>');
+
+    scripted!.mockNextText('notify two answers the question');
+    first.release();
+
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+    // Exactly two real LLM turns ran: the first notification and the
+    // follow-up one; the prompt itself was flushed without a call.
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+    expect(chunkTexts(c)).toContain('notify two answers the question');
+  }, 30_000);
+
+  it('cancels a prompt still queued behind an engine-internal turn', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('notify work', first.gate);
+    injectNotification(c, created.sessionId, 'task:test:completed', '<notification>one</notification>');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'queued message' }],
+    });
+    // Let the launch round-trip resolve (queued) before cancelling.
+    await sleep(500);
+    c.notify('session/cancel', { sessionId: created.sessionId });
+
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('cancelled');
+
+    // The cancelled prompt must not consume a turn once the queue drains.
+    first.release();
+    await sleep(1_000);
+    expect(scripted!.callCount()).toBe(1);
+  }, 30_000);
+
+  it('queues a second prompt behind the in-flight one and answers both in order', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('first answer', first.gate);
+    const prompt1 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    scripted!.mockNextText('second answer');
+    const prompt2 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'second' }],
+    });
+    // The second prompt waits for the first to settle: it neither settles
+    // nor consumes the next scripted response while the first turn is open.
+    const early = await Promise.race([
+      prompt2.then(() => 'settled' as const),
+      sleep(500).then(() => 'pending' as const),
+    ]);
+    expect(early).toBe('pending');
+    expect(scripted!.callCount()).toBe(1);
+
+    first.release();
+    const result1 = (await prompt1) as { stopReason: string };
+    const result2 = (await prompt2) as { stopReason: string };
+    expect(result1.stopReason).toBe('end_turn');
+    expect(result2.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+
+    const texts = chunkTexts(c);
+    expect(texts.indexOf('first answer')).toBeGreaterThanOrEqual(0);
+    expect(texts.indexOf('second answer')).toBeGreaterThan(texts.indexOf('first answer'));
   }, 30_000);
 });
 

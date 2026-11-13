@@ -51,6 +51,12 @@ export const turnEndedEventSchema = z.object({
   interruptReason: z
     .enum(['user_cancelled', 'aborted', 'max_steps', 'error', 'filtered', 'blocked'])
     .optional(),
+  /**
+   * Engine stop marker — present on `prompt_only` turns (a queued prompt
+   * flushed into context without an LLM call ahead of a pending notification
+   * turn). Lets turn consumers tell a context flush from a real response.
+   */
+  stopReason: z.string().optional(),
   requestId: z.string().optional(),
 });
 

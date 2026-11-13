@@ -37,6 +37,12 @@ export const promptPartSchema = z.discriminatedUnion('type', [
 
 export const emptyPayloadSchema = z.object({});
 
+/** Mirrors the engine's `LoopCancelTarget` (`IAgentLoopService.cancel`). */
+export const loopCancelTargetSchema = z.object({
+  turnId: z.number().optional(),
+  promptId: z.string().min(1).optional(),
+});
+
 export const promptPayloadSchema = z.object({
   input: z.array(promptPartSchema),
   // Mirrors `PromptPayload.promptId` in the engine (client-chosen prompt

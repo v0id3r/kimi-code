@@ -108,6 +108,12 @@ export interface AgentFacade {
    */
   activateSkill(input: { name: string; path?: string; args?: string }): Promise<PromptLaunchResult>;
   cancel(input?: { turnId?: number }): Promise<void>;
+  /**
+   * Cancel a prompt still sitting in the engine's queue (no turn yet), by
+   * its prompt record id. The engine drops it and publishes
+   * `prompt.aborted`; a prompt that already launched rejects.
+   */
+  cancelPrompt(input: { promptId: string }): Promise<void>;
   runShellCommand(input: { command: string; commandId?: string }): Promise<ShellCommandResult>;
   cancelShellCommand(input: { commandId: string }): Promise<void>;
   getModel(): Promise<string>;
@@ -160,6 +166,8 @@ export function createAgentFacade(call: ScopedCaller, scope: ScopeRef): AgentFac
       // No turnId sends an empty arg list: `[undefined]` would cross the wire
       // as `[null]`, and `cancelFromUser(null)` would not match the active turn.
       call(scope, 'agentLoopService', 'cancelFromUser', input?.turnId === undefined ? [] : [input.turnId]) as Promise<void>,
+    cancelPrompt: (input) =>
+      call(scope, 'agentLoopService', 'cancel', [{ promptId: input.promptId }]) as Promise<void>,
     runShellCommand: (input) =>
       call(scope, 'agentShellCommandService', 'run', [input]) as Promise<ShellCommandResult>,
     cancelShellCommand: (input) =>

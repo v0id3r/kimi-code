@@ -37,6 +37,8 @@ interface ScriptedResponse {
   readonly finishReason?: FinishReason | null;
   readonly rawFinishReason?: string | null;
   readonly usage?: TokenUsage;
+  /** Awaited before the stream yields — holds the turn open until released. */
+  readonly gate?: Promise<void>;
 }
 
 const ZERO_USAGE: TokenUsage = {
@@ -65,6 +67,7 @@ class ScriptedStream {
   ) {}
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
+    if (this.response.gate !== undefined) await this.response.gate;
     for (const part of this.parts) {
       yield part;
     }
@@ -122,6 +125,8 @@ export interface ScriptedProvider {
   mockNextText(text: string): void;
   /** Push a text-only response with an explicit provider usage report. */
   mockNextTextWithUsage(text: string, usage: TokenUsage): void;
+  /** Push a text-only response whose stream stays silent until `gate` resolves. */
+  mockNextGatedText(text: string, gate: Promise<void>): void;
   /** Push a response assembled from arbitrary streamed parts. */
   mockNextResponse(...parts: StreamedMessagePart[]): void;
   /** Push a response with an explicit finish reason. */
@@ -206,6 +211,9 @@ export function createScriptedProvider(): ScriptedProvider {
     },
     mockNextTextWithUsage: (text, usage) => {
       queue.push({ parts: [{ type: 'text', text }], usage });
+    },
+    mockNextGatedText: (text, gate) => {
+      queue.push({ parts: [{ type: 'text', text }], gate });
     },
     mockNextResponse: (...parts) => {
       queue.push({ parts: structuredClone(parts) });
