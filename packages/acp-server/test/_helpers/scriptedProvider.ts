@@ -23,32 +23,53 @@ export interface ScriptedProvider {
   }): void;
   callCount(): number;
   callHistory(): ReadonlyArray<readonly Message[]>;
+  systemPrompts(): readonly string[];
 }
 
 export function createScriptedProvider(): ScriptedProvider {
   const queue: MockProviderResponse[] = [];
   const calls: Array<readonly Message[]> = [];
-  const provider = createMockProvider((request, signal) => {
-    signal.throwIfAborted();
-    const response = queue.shift();
-    if (response === undefined) {
-      throw new Error(
-        `scriptedProvider: unexpected generate() call #${String(calls.length + 1)} — ` +
-          'queue exhausted. Push another response via mockNextResponse().',
-      );
-    }
-    calls.push(structuredClone(request.content.messages));
-    return {
-      ...response,
-      id: response.id ?? `scripted-${String(calls.length)}`,
-      usage: response.usage ?? {
-        inputOther: 0,
-        output: response.parts?.length ?? 0,
-        inputCacheRead: 0,
-        inputCacheCreation: 0,
-      },
-    };
-  });
+  const systemPrompts: string[] = [];
+  const provider = new ScriptedChatProvider(queue, calls);
+  const requester: LlmRequester = {
+    async generate(config, content, control) {
+      systemPrompts.push(config.systemPrompt ?? '');
+      control.onEvent?.({ type: 'llm.sent' });
+      try {
+        const stream = await provider.generate(
+          config.systemPrompt ?? '',
+          [...(config.tools ?? [])],
+          content.messages,
+          { signal: control.signal },
+        );
+        for await (const part of stream) {
+          control.onEvent?.({ type: 'llm.streaming.part', part });
+          control.signal.throwIfAborted();
+        }
+        control.onEvent?.({ type: 'llm.streaming.usage', usage: stream.usage ?? ZERO_USAGE });
+        control.onEvent?.({
+          type: 'llm.streaming.finish',
+          finish: {
+            finishReason: stream.finishReason,
+            rawFinishReason: stream.rawFinishReason,
+          },
+        });
+        if (stream.id !== null) {
+          control.onEvent?.({ type: 'llm.streaming.message_id', messageId: stream.id });
+        }
+        control.onEvent?.({ type: 'llm.done' });
+      } catch (error) {
+        control.onEvent?.({
+          type: 'llm.failed.remote',
+          error: {
+            kind: 'unknown',
+            message: error instanceof Error ? error.message : String(error),
+            retryable: false,
+          },
+        });
+      }
+    },
+  };
   const real = new ProtocolAdapterRegistry();
   const registry: IProtocolAdapterRegistryType = {
     _serviceBrand: undefined,
@@ -72,5 +93,6 @@ export function createScriptedProvider(): ScriptedProvider {
     },
     callCount: () => calls.length,
     callHistory: () => calls,
+    systemPrompts: () => systemPrompts,
   };
 }

@@ -31,6 +31,7 @@ interface HandleWire {
 export interface SessionRestoreOptions {
   readonly additionalDirs?: readonly string[];
   readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
+  readonly systemPromptAppend?: string;
 }
 
 export interface SessionApprovalsFacade {
