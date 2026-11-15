@@ -213,7 +213,13 @@ export class WireService extends Service implements IWireService, IAgentJournal 
   }
 
   async readRestoreChains(): Promise<WireRestoreChains> {
-    const entries = await this.readStableEntries();
+    let entries = await this.readStableEntries();
+    if (this.lines !== this.lastReadLineCount || this.log.externallyModified(this.wireScope, AGENT_WIRE_RECORD_KEY)) {
+      await this.flush();
+      if (!this.log.externallyModified(this.wireScope, AGENT_WIRE_RECORD_KEY)) {
+        entries = await this.readStableEntries();
+      }
+    }
     const tree = parseTree(entries, entries.at(-1)?.line ?? 0);
     this.treeSnapshot = tree;
     this.reportTreeDiagnostics(tree);
