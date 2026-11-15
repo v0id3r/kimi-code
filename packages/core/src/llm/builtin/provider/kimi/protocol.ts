@@ -28,6 +28,9 @@ import { normalizeKimiToolSchema } from './schema';
 
 export const KIMI_DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 
+const KIMI_PROMPT_CACHE_OPTIONS = { mode: 'implicit', ttl: '1h' } as const;
+const KIMI_ANTHROPIC_CACHE_CONTROL = { type: 'ephemeral', ttl: '1h' } as const;
+
 export interface KimiThinkingConfig {
   type?: 'enabled' | 'disabled';
   effort?: string;
@@ -162,7 +165,14 @@ export const kimiOpenAIProtocol = openAIProtocol.with((base) => ({
   },
   flatten: (native, module) => {
     const { extra_body: extraBody, ...extras } = module.options?.extras ?? {};
-    const options = { ...module.options, extras: { ...extras, ...extraBody } };
+    const options = {
+      ...module.options,
+      extras: {
+        prompt_cache_options: KIMI_PROMPT_CACHE_OPTIONS,
+        ...extras,
+        ...extraBody,
+      },
+    };
     return base.flatten(native, { ...module, options });
   },
   decodeError: withKimiErrors(base),
@@ -182,6 +192,16 @@ export const kimiAnthropicProtocol = anthropicProtocol.with((base) => ({
             betaFeatures: [CONTEXT_MANAGEMENT_BETA],
           },
   message: (message) => lowerAnthropicMessage(message, kimiImageMimes),
+  flatten: (native, module) => {
+    const request = base.flatten(native, module);
+    return {
+      ...request,
+      params: {
+        cache_control: KIMI_ANTHROPIC_CACHE_CONTROL,
+        ...request.params,
+      },
+    };
+  },
   decodeError: withKimiErrors(base),
 }));
 
@@ -191,6 +211,16 @@ export const kimiResponsesProtocol = openAIResponsesProtocol.with((base) => ({
   legality: {
     ...openAIResponsesModelLegality,
     fillMaxOutputTokens: fillKimiMaxOutputTokens,
+  },
+  flatten: (native, module) => {
+    const request = base.flatten(native, module);
+    return {
+      ...request,
+      params: {
+        prompt_cache_options: KIMI_PROMPT_CACHE_OPTIONS,
+        ...request.params,
+      },
+    };
   },
   decodeError: withKimiErrors(base),
 }));
