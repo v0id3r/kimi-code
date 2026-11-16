@@ -512,18 +512,24 @@ export interface AcpUsageTokens {
   readonly cacheCreationInputTokens: number;
 }
 
+/** A disjoint slice of session token usage; hosts count each `usageId` once. */
+export interface AcpUsageReport {
+  readonly usageId: string;
+  readonly usage: AcpUsageTokens;
+}
+
 /**
  * Build a one-shot `usage_update` session notification, emitted after a turn
  * settles. `used` is the agent's current context token count, `size` the bound
  * model's max context size; `cost` stays omitted (the engine has no cost
- * data). `tokens` (when the engine recorded any token usage) rides
- * `_meta.usage` as an extension for hosts that render token totals.
+ * data). `report` (when the engine recorded new token usage) rides `_meta`
+ * as an extension for hosts that render token totals.
  */
 export function usageUpdateNotification(
   sessionId: string,
   used: number,
   size: number,
-  tokens?: AcpUsageTokens,
+  report?: AcpUsageReport,
 ): SessionNotification {
   return {
     sessionId,
@@ -531,7 +537,7 @@ export function usageUpdateNotification(
       sessionUpdate: 'usage_update',
       used,
       size,
-      ...(tokens === undefined ? {} : { _meta: { usage: tokens } }),
+      ...(report === undefined ? {} : { _meta: { ...report } }),
     },
   };
 }
