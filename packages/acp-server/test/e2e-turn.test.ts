@@ -130,16 +130,82 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     expect((prompt as { stopReason: string }).stopReason).toBe('end_turn');
 
     const usage = await c.waitForSessionUpdate('usage_update', 10_000);
-    const tokens = (
-      usage.params as { update?: { _meta?: { usage?: Record<string, number> } } }
-    ).update?._meta?.usage;
-    expect(tokens).toEqual({
+    const meta = (
+      usage.params as { update?: { _meta?: { usageId?: string; usage?: Record<string, number> } } }
+    ).update?._meta;
+    expect(typeof meta?.usageId).toBe('string');
+    expect(meta?.usage).toEqual({
       inputTokens: 48,
       outputTokens: 5,
       totalTokens: 53,
       cacheReadInputTokens: 30,
       cacheCreationInputTokens: 7,
     });
+  }, 30_000);
+
+  type UsageMeta = { usageId?: string; usage?: Record<string, number> };
+  type MockUsage = Parameters<ScriptedProvider['mockNextTextWithUsage']>[1];
+  const FIRST_USAGE = { inputOther: 11, output: 5, inputCacheRead: 30, inputCacheCreation: 7 };
+  const SECOND_USAGE = { inputOther: 2, output: 3, inputCacheRead: 40, inputCacheCreation: 0 };
+
+  function usageReports(c: TestClient): (UsageMeta | undefined)[] {
+    return c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: { sessionUpdate?: string; _meta?: UsageMeta } }).update)
+      .filter((u) => u?.sessionUpdate === 'usage_update')
+      .map((u) => u?._meta);
+  }
+
+  async function promptWithUsage(c: TestClient, sessionId: string, usage: MockUsage) {
+    const before = usageReports(c).length;
+    scripted!.mockNextTextWithUsage('turn', usage);
+    await c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'turn' }] });
+    await vi.waitFor(
+      () => {
+        expect(usageReports(c).length).toBe(before + 1);
+      },
+      { timeout: 10_000 },
+    );
+    return usageReports(c).at(-1);
+  }
+
+  it('reports each turn its own tokens under a distinct usageId', async () => {
+    const c = await boot();
+    const { sessionId } = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = await promptWithUsage(c, sessionId, FIRST_USAGE);
+    const second = await promptWithUsage(c, sessionId, SECOND_USAGE);
+    expect(first?.usage).toMatchObject({ inputTokens: 48, outputTokens: 5 });
+    expect(second?.usage).toEqual({
+      inputTokens: 42,
+      outputTokens: 3,
+      totalTokens: 45,
+      cacheReadInputTokens: 40,
+      cacheCreationInputTokens: 0,
+    });
+    expect(second?.usageId).not.toBe(first?.usageId);
+  }, 30_000);
+
+  it('does not re-report restored session usage after a host restart', async () => {
+    const c = await boot();
+    const { sessionId } = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    await promptWithUsage(c, sessionId, FIRST_USAGE);
+    await c.close();
+
+    scripted = createScriptedProvider();
+    const restarted = await createTestClient({ homeDir: homeDir!, extraSeeds: [scripted.seed] });
+    client = restarted;
+    await restarted.send('initialize', { protocolVersion: 1, clientCapabilities: {} });
+    await restarted.send('session/load', { sessionId, cwd: homeDir, mcpServers: [] });
+
+    const report = await promptWithUsage(restarted, sessionId, SECOND_USAGE);
+    expect(report?.usage).toMatchObject({ inputTokens: 42, outputTokens: 3 });
   }, 30_000);
 
   it('runs a tool call and bridges the approval request to the client', async () => {

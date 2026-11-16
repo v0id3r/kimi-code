@@ -98,7 +98,7 @@ import {
   toolResultToSessionUpdate,
   turnEndReasonToStopReason,
   usageUpdateNotification,
-  type AcpUsageTokens,
+  type AcpUsageReport,
   isAuthError,
   stringifyArgs,
 } from './events-map';
@@ -115,6 +115,24 @@ function leadingText(blocks: readonly ContentBlock[]): string | undefined {
   return undefined;
 }
 
+function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    inputOther: a.inputOther - b.inputOther,
+    output: a.output - b.output,
+    inputCacheRead:
+      a.inputCacheRead === undefined || b.inputCacheRead === undefined
+        ? undefined
+        : a.inputCacheRead - b.inputCacheRead,
+    inputCacheCreation: a.inputCacheCreation - b.inputCacheCreation,
+  };
+}
+
+/**
+ * The engine's wire code for "another turn is active". A plain
+ * `agent.prompt` while busy is QUEUED by the engine (the RPC returns
+ * `undefined`, indistinguishable from a hook-blocked launch), so this code
+ * only reaches us from `agent.activateSkill`, which rejects instead.
+ */
 const TURN_AGENT_BUSY_CODE = 'turn.agent_busy';
 const SESSION_OCCUPIED_CODE = 'session.occupied';
 const SESSION_STALE_CODE = 'session.stale';
@@ -244,6 +262,8 @@ export class AcpSession {
 
   private currentModelId: string = '';
   private currentThinkingLevel: string = 'off';
+  private reportedUsage: TokenUsage | undefined;
+  /** Current ACP mode. */
   private currentModeId: AcpModeId = DEFAULT_MODE_ID;
   private skills: readonly SkillSummary[] = [];
   private driver: TurnDriver | undefined;
@@ -380,8 +400,10 @@ export class AcpSession {
     try {
       this.currentModelId = await this.agent.getModel();
       this.currentThinkingLevel = await this.agent.getThinking();
+      this.reportedUsage = (await this.agent.getUsage()).total;
     } catch (error) {
-      log.warn('acp: could not seed model/thinking state', {
+      // Keep the unbound defaults — configOptions stays honest.
+      log.warn('acp: could not seed model/thinking/usage state', {
         sessionId: this.sessionId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -1110,9 +1132,10 @@ export class AcpSession {
    * current context token count, `size` = the bound model's max context size
    * from the catalog. Skipped while no catalog model matches the bound id —
    * there is nothing honest to report. `cost` stays omitted (the engine has
-   * no cost data). Recorded token totals ride `_meta.usage` (OpenAI/Codex
-   * vocabulary) when the engine has any; a getUsage failure or an all-zero
-   * tally falls back to the plain {used, size} shape.
+   * no cost data). Tokens recorded since the previous report ride
+   * `_meta.usage` (OpenAI/Codex vocabulary) under a fresh `_meta.usageId`;
+   * a getUsage failure or no new tokens falls back to the plain {used, size}
+   * shape.
    */
   private async emitUsageUpdate(turnId?: number): Promise<void> {
     try {
@@ -1123,7 +1146,7 @@ export class AcpSession {
       const context = await this.agent.getContext();
       this.emitTurn(
         turnId,
-        usageUpdateNotification(this.sessionId, context.tokenCount, size, await this.tokenUsage()),
+        usageUpdateNotification(this.sessionId, context.tokenCount, size, await this.usageReport()),
       );
     } catch (error) {
       log.warn('acp: failed to push usage_update', {
@@ -1134,32 +1157,37 @@ export class AcpSession {
   }
 
   /**
-   * Token totals for the `usage_update` `_meta.usage` extension: the session's
-   * cumulative `total` usage (falling back to the current turn's), mapped to
-   * the OpenAI/Codex field names the host parses. Returns undefined when the
-   * engine recorded no tokens at all (or getUsage failed) so the notification
-   * stays in its legacy {used, size} shape.
+   * The session tokens recorded since the previous report (or since `init`,
+   * so a resumed session does not re-report its history), mapped to the
+   * OpenAI/Codex field names the host parses. Hosts count each `usageId`
+   * once, so every report is a disjoint slice of the session total. Returns
+   * undefined when nothing new was recorded or getUsage failed.
    */
-  private async tokenUsage(): Promise<AcpUsageTokens | undefined> {
-    let usage: TokenUsage | undefined;
+  private async usageReport(): Promise<AcpUsageReport | undefined> {
+    let total: TokenUsage | undefined;
     try {
-      const status = await this.agent.getUsage();
-      usage = status.total ?? status.currentTurn;
+      total = (await this.agent.getUsage()).total;
     } catch {
       return undefined;
     }
-    if (usage === undefined) return undefined;
+    if (total === undefined) return undefined;
+    const usage =
+      this.reportedUsage === undefined ? total : subtractUsage(total, this.reportedUsage);
+    this.reportedUsage = total;
     const input = usage.inputOther + (usage.inputCacheRead ?? 0) + usage.inputCacheCreation;
     const output = usage.output;
     if (input === 0 && output === 0) return undefined;
     return {
-      inputTokens: input,
-      outputTokens: output,
-      totalTokens: grandTotal(usage) ?? input + output,
-      ...(usage.inputCacheRead === undefined
-        ? {}
-        : { cacheReadInputTokens: usage.inputCacheRead }),
-      cacheCreationInputTokens: usage.inputCacheCreation,
+      usageId: randomUUID(),
+      usage: {
+        inputTokens: input,
+        outputTokens: output,
+        totalTokens: grandTotal(usage) ?? input + output,
+        ...(usage.inputCacheRead === undefined
+          ? {}
+          : { cacheReadInputTokens: usage.inputCacheRead }),
+        cacheCreationInputTokens: usage.inputCacheCreation,
+      },
     };
   }
   private onMetadataChanged(event: SessionEventPayloads['metadata.changed']): void {

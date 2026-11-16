@@ -381,11 +381,16 @@ export interface AcpUsageTokens {
   readonly cacheCreationInputTokens: number;
 }
 
+export interface AcpUsageReport {
+  readonly usageId: string;
+  readonly usage: AcpUsageTokens;
+}
+
 export function usageUpdateNotification(
   sessionId: string,
   used: number,
   size: number,
-  tokens?: AcpUsageTokens,
+  report?: AcpUsageReport,
 ): SessionNotification {
   return {
     sessionId,
@@ -393,7 +398,7 @@ export function usageUpdateNotification(
       sessionUpdate: 'usage_update',
       used,
       size,
-      ...(tokens === undefined ? {} : { _meta: { usage: tokens } }),
+      ...(report === undefined ? {} : { _meta: { ...report } }),
     },
   };
 }
