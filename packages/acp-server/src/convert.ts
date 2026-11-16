@@ -328,8 +328,7 @@ function composePlanContent(
  * to completed/failed.
  *
  * Diff content does NOT come from this function: `ToolResultEvent` has no
- * `display` field; diffs attach to `ToolCallStartedEvent.display` and are
- * emitted by `toolCallStartToSessionUpdate`.
+ * `display` field; the caller carries the start event's diff into the terminal update.
  */
 export function toolResultToAcpContent(event: ToolResultEvent): ToolCallContent[] {
   const out = event.output;

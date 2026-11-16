@@ -1393,7 +1393,14 @@ describe('acp-server terminal reverse-RPC (clientCapabilities.terminal)', () => 
   type ToolCallUpdate = {
     sessionUpdate?: string;
     status?: string;
-    content?: Array<{ type?: string; terminalId?: string; content?: { text?: string } }>;
+    content?: Array<{
+      type?: string;
+      terminalId?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+      content?: { type?: string; text?: string };
+    }>;
   };
 
   const toolCallUpdates = (c: TestClient): ToolCallUpdate[] =>
@@ -1460,5 +1467,27 @@ describe('acp-server terminal reverse-RPC (clientCapabilities.terminal)', () => 
     const completed = toolCallUpdates(c).find((u) => u.status === 'completed');
     const text = completed?.content?.map((entry) => entry.content?.text ?? '').join('\n') ?? '';
     expect(text).toContain('hello_from_bash');
+  }, 30_000);
+
+  it('keeps the Edit diff in the completed tool call content', async () => {
+    const c = await boot({});
+    const path = join(homeDir!, 'note.txt');
+    await writeFile(path, 'before\n');
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_edit',
+      name: 'Edit',
+      arguments: JSON.stringify({ path, old_string: 'before\n', new_string: 'after\n' }),
+    });
+    scripted!.mockNextText('edited');
+
+    const { stopReason } = await runPrompt(c);
+    expect(stopReason).toBe('end_turn');
+
+    const completed = toolCallUpdates(c).find((u) => u.status === 'completed');
+    expect(completed?.content).toEqual([
+      { type: 'diff', path, oldText: 'before\n', newText: 'after\n' },
+      { type: 'content', content: { type: 'text', text: `Replaced 1 occurrence in ${path}` } },
+    ]);
   }, 30_000);
 });

@@ -369,14 +369,15 @@ export function thinkingDeltaToSessionUpdate(
  * Map a `tool.result` event to the **terminal** `tool_call_update`
  * notification for that call. `status` flips to `completed` (success) or
  * `failed` (`event.isError === true`); content replaces the streaming args
- * preview with the final tool output; `rawOutput` preserves the raw output.
- * `ToolResultEvent` carries no args/display, so `locations` (derived at
- * `tool.call.started` by the caller) is re-attached here when available.
+ * preview with the start event's diff and final tool output; `rawOutput` preserves
+ * the raw output. `ToolResultEvent` carries no args/display, so `locations` and
+ * `diff` (derived at `tool.call.started` by the caller) are re-attached here.
  */
 export function toolResultToSessionUpdate(
   sessionId: string,
   event: ToolResultEvent,
   locations?: ToolCallLocation[],
+  diff?: ToolCallContent,
 ): SessionNotification {
   return {
     sessionId,
@@ -384,7 +385,7 @@ export function toolResultToSessionUpdate(
       sessionUpdate: 'tool_call_update',
       toolCallId: acpToolCallId(event.turnId, event.toolCallId),
       status: event.isError ? 'failed' : 'completed',
-      content: toolResultToAcpContent(event),
+      content: [...(diff === undefined ? [] : [diff]), ...toolResultToAcpContent(event)],
       rawOutput: event.output,
       locations,
     },
