@@ -275,6 +275,7 @@ export function toolResultToSessionUpdate(
   sessionId: string,
   event: ToolResultEvent,
   locations?: ToolCallLocation[],
+  diff?: ToolCallContent,
 ): SessionNotification {
   return {
     sessionId,
@@ -282,7 +283,7 @@ export function toolResultToSessionUpdate(
       sessionUpdate: 'tool_call_update',
       toolCallId: acpToolCallId(event.turnId, event.toolCallId),
       status: event.isError ? 'failed' : 'completed',
-      content: toolResultToAcpContent(event),
+      content: [...(diff === undefined ? [] : [diff]), ...toolResultToAcpContent(event)],
       rawOutput: event.output,
       locations,
     },

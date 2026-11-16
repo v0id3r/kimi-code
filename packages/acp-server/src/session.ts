@@ -35,6 +35,7 @@ import type {
   SessionConfigOption,
   SessionModeState,
   SessionNotification,
+  ToolCallContent,
   ToolCallLocation,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -74,7 +75,11 @@ import {
   runBuiltinSlashCommand,
 } from './builtin-commands';
 import { buildSessionConfigOptions } from './config-options';
-import { acpBlocksToContentParts, compressPromptImageParts } from './convert';
+import {
+  acpBlocksToContentParts,
+  compressPromptImageParts,
+  displayBlockToAcpContent,
+} from './convert';
 import {
   acpToolCallId,
   assistantDeltaToSessionUpdate,
@@ -265,6 +270,13 @@ export class AcpSession {
   private readonly toolCallStreamArgs = new Map<string, { args: string }>();
   private readonly toolStatuses = new Map<string, string>();
   private readonly toolLocations = new Map<string, ToolCallLocation[]>();
+  private readonly toolDiffs = new Map<string, ToolCallContent>();
+  /**
+   * In-flight Bash tool calls awaiting terminal correlation, keyed by the ACP
+   * wire toolCallId; the value is the model's `args.command`. Filled at
+   * `tool.call.started`, consumed by {@link onTerminalCreated} (or dropped at
+   * `tool.result`).
+   */
   private readonly bashCallsAwaitingTerminal = new Map<string, string>();
   private readonly terminalBackedCalls = new Map<string, string>();
   private readonly interactionBridge: AcpInteractionBridge;
@@ -825,6 +837,10 @@ export class AcpSession {
     if (locations !== undefined) {
       this.toolLocations.set(key, locations);
     }
+    const diff = mapped.display === undefined ? null : displayBlockToAcpContent(mapped.display);
+    if (diff?.type === 'diff') {
+      this.toolDiffs.set(key, diff);
+    }
     if (mapped.name === 'Bash') {
       const command = (mapped.args as { command?: unknown } | undefined)?.command;
       if (typeof command === 'string') {
@@ -882,6 +898,8 @@ export class AcpSession {
     this.toolStatuses.delete(key);
     const locations = this.toolLocations.get(key);
     this.toolLocations.delete(key);
+    const diff = this.toolDiffs.get(key);
+    this.toolDiffs.delete(key);
     this.bashCallsAwaitingTerminal.delete(key);
     this.toolCallStreamArgs.delete(key);
     const terminalId = this.terminalBackedCalls.get(key);
@@ -905,7 +923,7 @@ export class AcpSession {
     }
     this.emitTurn(
       event.turnId,
-      toolResultToSessionUpdate(this.sessionId, event as unknown as ToolResultEvent, locations),
+      toolResultToSessionUpdate(this.sessionId, event as unknown as ToolResultEvent, locations, diff),
     );
   }
 
