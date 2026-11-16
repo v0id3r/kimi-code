@@ -20,6 +20,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         platform: [darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64, win32-x64]
     steps:
