@@ -26,6 +26,7 @@
 #   loopControl              src/agent/loop/configSection.ts
 #   mcp                      src/app/mcpConfig/configSection.ts
 #   mergeAllAvailableSkills  src/features/skill/catalog/configSection.ts
+#   microCompaction          src/agent/microCompaction/configSection.ts
 #   modelCatalog             src/app/kosongConfig/configSection.ts
 #   models                   src/app/kosongConfig/configSection.ts
 #   permission               src/agent/permissionRules/configSection.ts
@@ -277,6 +278,20 @@ extra_skill_dirs = []
 # ##########################################################################
 
 merge_all_available_skills = true
+
+# ##########################################################################
+# microCompaction (config.toml: micro_compaction)
+#   owner: src/agent/microCompaction/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[micro_compaction]
+# enabled: boolean
+# keep_recent: integer
+# min_result_tokens: integer
+# trigger_tokens: integer
+# clear_at_least_tokens: integer
+# idle_margin_seconds: integer
 
 # ##########################################################################
 # modelCatalog (config.toml: model_catalog)

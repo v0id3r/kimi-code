@@ -1,6 +1,7 @@
-import type { LlmRecovery, LlmRecoveryRecord } from '@moonshot-ai/core/llm/policy/recovery';
-import type { LlmResolver } from '@moonshot-ai/core/llm/policy/resolver';
-import type { LlmRequest } from '@moonshot-ai/core/llm/request';
+import type { LlmRecovery, LlmRecoveryRecord } from '#human/llm/policy/recovery';
+import type { LlmResolver } from '#human/llm/policy/resolver';
+import type { LlmRequest } from '#human/llm/request';
+import type { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
 
 import type { AgentLoopProjector } from './projector';
 
@@ -13,6 +14,30 @@ export function hasStrictStructureRecovery(
     (recovery) =>
       recovery.strategy === STRUCTURE_RECOVERY_STRATEGY && recovery.action === 'strict',
   );
+}
+
+/**
+ * Micro-compaction runs first: it projects the cleared tool results into the
+ * request, and (for turn requests) evaluates triggers and persists the newly
+ * cleared outputs before the request is sent.
+ */
+export function createMicroCompactionResolver(
+  microCompaction: IAgentMicroCompactionService,
+  isTurnRequest: () => boolean,
+): LlmResolver {
+  return {
+    id: 'micro-compaction',
+    resolve: async (request) => {
+      if (isTurnRequest()) {
+        await microCompaction.prepareForTurnRequest();
+      }
+      if (!microCompaction.active()) return request;
+      const messages = microCompaction.projectMessages(request.content.messages);
+      return messages === request.content.messages
+        ? request
+        : { ...request, content: { ...request.content, messages } };
+    },
+  };
 }
 
 function projectRequest(
