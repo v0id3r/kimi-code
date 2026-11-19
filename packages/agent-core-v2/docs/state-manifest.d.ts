@@ -1058,13 +1058,14 @@ export interface AgentStateSnapshot {
   // src/agent/media/mediaToolsRegistrar.ts
   'media.registeredKey': string | undefined;
   // src/agent/microCompaction/microCompactionOps.ts
-  // replayable · durable — folds: MicroCompactionApply, ContextApplyCompaction, ContextClear
+  // replayable · durable — folds: MicroCompactionApply, UsageRecord, ContextApplyCompaction, ContextClear
   'microCompaction': /* MicroCompactionState — packages/agent-core-v2/src/agent/microCompaction/microCompactionOps.ts */ {
     readonly cleared: readonly /* MicroCompactionClearedEntry — packages/agent-core-v2/src/agent/microCompaction/microCompactionOps.ts */ {
       readonly toolCallId: string;
       readonly path: string;
       readonly tokens: number;
     }[];
+    readonly lastTurnResponseAt: number | null;
   };
   // src/agent/permissionMode/injection/permissionModeInjection.ts
   'permissionMode.lastMode': 'manual' | 'auto' | 'yolo' | undefined;

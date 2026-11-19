@@ -10,6 +10,8 @@ import {
   microCompactionKey,
   MicroCompactionApply,
 } from '#/agent/microCompaction/microCompactionOps';
+import { UsageRecord } from '#/agent/usage/usageOps';
+import { emptyUsage } from '#human/llm-requester/usage';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
@@ -141,5 +143,54 @@ describe('microCompaction ops (wire-backed)', () => {
     void dispatcher.dispatch(applyEvent([{ toolCallId: 'c1', path: '/r/c1.txt', tokens: 3000 }]));
     void dispatcher.dispatch(new ContextClear({ agentId: 'test-agent' }));
     expect(agentState.get(microCompactionKey).cleared).toEqual([]);
+  });
+});
+
+describe('microCompaction idle clock (usage.record fold)', () => {
+  const usage = emptyUsage();
+
+  it('records the time of the last turn-scoped response', () => {
+    void dispatcher.dispatch(
+      new UsageRecord(
+        { agentId: 'test-agent', model: 'm', usage, usageScope: 'turn' },
+        12345,
+      ),
+    );
+    expect(agentState.get(microCompactionKey).lastTurnResponseAt).toBe(12345);
+    void dispatcher.dispatch(
+      new UsageRecord(
+        { agentId: 'test-agent', model: 'm', usage, usageScope: 'turn' },
+        23456,
+      ),
+    );
+    expect(agentState.get(microCompactionKey).lastTurnResponseAt).toBe(23456);
+  });
+
+  it('ignores non-turn (operation) responses', () => {
+    void dispatcher.dispatch(
+      new UsageRecord(
+        { agentId: 'test-agent', model: 'm', usage, usageScope: 'session' },
+        12345,
+      ),
+    );
+    expect(agentState.get(microCompactionKey).lastTurnResponseAt).toBeNull();
+  });
+
+  it('resets the clock on full compaction', () => {
+    void dispatcher.dispatch(
+      new UsageRecord(
+        { agentId: 'test-agent', model: 'm', usage, usageScope: 'turn' },
+        12345,
+      ),
+    );
+    expect(agentState.get(microCompactionKey).lastTurnResponseAt).toBe(12345);
+    void dispatcher.dispatch(
+      new ContextApplyCompaction({
+        agentId: 'test-agent',
+        summary: 'summary',
+        compactedCount: 10,
+      }),
+    );
+    expect(agentState.get(microCompactionKey).lastTurnResponseAt).toBeNull();
   });
 });

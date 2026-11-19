@@ -252,9 +252,9 @@ describe('projectMicroCompaction', () => {
     expect(projectMicroCompaction(messages, new Map())).toBe(messages);
   });
 
-  it('marker mentions the saved path and Read', () => {
+  it('marker mentions the saved path and paged Read', () => {
     expect(microCompactionMarker('/a/b.txt')).toBe(
-      '[Old tool result content cleared. Full output saved to: /a/b.txt. Use Read to view it if needed.]',
+      '[Old tool result content cleared. Full output saved to: /a/b.txt. Use Read (with offset/limit for large files) to view it if needed.]',
     );
   });
 });

@@ -6,6 +6,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { ILogService } from '#/_base/log/log';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
@@ -41,7 +42,6 @@ export class AgentMicroCompactionService extends Service implements IAgentMicroC
   declare readonly _serviceBrand: undefined;
 
   private readonly storageScope: string;
-  private lastTurnRequestAt: number | null = null;
 
   constructor(
     @IConfigService private readonly configService: IConfigService,
@@ -52,6 +52,7 @@ export class AgentMicroCompactionService extends Service implements IAgentMicroC
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @IFileSystemStorageService private readonly storage: IFileSystemStorageService,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
+    @ILogService private readonly log: ILogService,
   ) {
     super();
     this.storageScope = agent.scope('tool-results');
@@ -82,8 +83,6 @@ export class AgentMicroCompactionService extends Service implements IAgentMicroC
 
   async prepareForTurnRequest(now: number = Date.now()): Promise<void> {
     const settings = this.settings();
-    const cacheIdleMs = this.lastTurnRequestAt === null ? null : now - this.lastTurnRequestAt;
-    this.lastTurnRequestAt = now;
     if (settings === undefined) return;
 
     const history = this.instantiation.invokeFunction((accessor) =>
@@ -96,6 +95,8 @@ export class AgentMicroCompactionService extends Service implements IAgentMicroC
       settings,
       (message) => this.tokenCounting.estimateMessage(message),
     );
+    const lastTurnResponseAt = this.states.get(microCompactionKey).lastTurnResponseAt;
+    const cacheIdleMs = lastTurnResponseAt === null ? null : now - lastTurnResponseAt;
     const plan = planMicroCompaction({
       contextTokens: this.tokenCounting.get(agentContextOfScope(this.agent)).size,
       cacheIdleMs,
@@ -137,11 +138,18 @@ export class AgentMicroCompactionService extends Service implements IAgentMicroC
     toolCallId: string,
     text: string,
   ): Promise<string | undefined> {
+    const key = `${safeToolResultFileStem(toolName, toolCallId)}-${randomUUID()}.txt`;
+    const path = join(this.bootstrap.homeDir, this.storageScope, key);
     try {
-      const key = `${safeToolResultFileStem(toolName, toolCallId)}-${randomUUID()}.txt`;
       await this.storage.write(this.storageScope, key, encoder.encode(text), { atomic: true });
-      return join(this.bootstrap.homeDir, this.storageScope, key);
-    } catch {
+      return path;
+    } catch (error) {
+      this.log.warn('micro_compaction: failed to save cleared tool result; keeping it in context', {
+        agentId: this.agent.agentId,
+        toolCallId,
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return undefined;
     }
   }
