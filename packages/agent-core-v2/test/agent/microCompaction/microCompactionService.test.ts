@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { DisposableStore } from '#/_base/di/lifecycle';
+import { DisposableStore, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
@@ -18,7 +18,11 @@ import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { SyncDescriptor } from '#/_base/di/descriptors';
-import { microCompactionMarker } from '#/agent/microCompaction/microCompactionCore';
+import { ILogService } from '#/_base/log/log';
+import { UsageRecord } from '#/agent/usage/usageOps';
+import { emptyUsage } from '#human/llm-requester/usage';
+import { microCompactionKey } from '#/agent/microCompaction/microCompactionOps';
+import { microCompactionMarker, PROMPT_CACHE_TTL_MS } from '#/agent/microCompaction/microCompactionCore';
 import {
   AgentMicroCompactionService,
 } from '#/agent/microCompaction/microCompactionService';
@@ -57,9 +61,18 @@ function textOf(message: ContextMessage): string {
     : '';
 }
 
+class IdempotentAgentStateService extends AgentStateService {
+  override contributeState<T>(key: Parameters<AgentStateService['contributeState']>[0]): IDisposable {
+    if (this.has(key)) return toDisposable(() => {});
+    return super.contributeState(key);
+  }
+}
+
 describe('AgentMicroCompactionService', () => {
   let disposables: DisposableStore;
   let writes: RecordedWrite[];
+  let warnCalls: { message: string; fields: Record<string, unknown> }[];
+  let failWrites: boolean;
   let history: ContextMessage[];
   let dispatcher: IEventDispatcher;
   let log: IAppendLogStore;
@@ -69,9 +82,12 @@ describe('AgentMicroCompactionService', () => {
     history: ContextMessage[];
     contextSize: number;
     config: Record<string, unknown> | undefined;
+    failWrites?: boolean;
   }): IAgentMicroCompactionService {
     const ix = disposables.add(new TestInstantiationService());
     writes = [];
+    warnCalls = [];
+    failWrites = options.failWrites ?? false;
     const memory = new InMemoryStorageService();
     ix.stub(
       IFileSystemStorageService,
@@ -79,6 +95,7 @@ describe('AgentMicroCompactionService', () => {
         get(target, prop) {
           if (prop === 'write') {
             return async (scope: string, key: string, bytes: Uint8Array, options?: unknown) => {
+              if (failWrites) throw new Error('disk full');
               writes.push({ scope, key, text: new TextDecoder().decode(bytes) });
               return (target as unknown as {
                 write(scope: string, key: string, bytes: Uint8Array, options?: unknown): Promise<void>;
@@ -96,15 +113,21 @@ describe('AgentMicroCompactionService', () => {
       log: ix.get(IAppendLogStore),
       eventBus: ix.get(IEventBus),
     });
+    ix.set(IAgentStateService, new IdempotentAgentStateService());
+    ix.get(IAgentStateService).contributeState(microCompactionKey);
     dispatcher = registerTestEventDispatcher(ix);
     log = ix.get(IAppendLogStore);
-    ix.set(IAgentStateService, new AgentStateService());
     ix.stub(IAgentScopeContext, makeAgentScopeContext({ agentId: 'test-agent', agentScope: SCOPE }));
     ix.stub(IConfigService, {
       get: ((key: string) =>
         key === 'microCompaction' ? options.config : undefined) as IConfigService['get'],
     } as unknown as IConfigService);
     ix.stub(IBootstrapService, { homeDir: '/home/test' } as unknown as IBootstrapService);
+    ix.stub(ILogService, {
+      warn: (message: string, fields?: Record<string, unknown>) => {
+        warnCalls.push({ message, fields: fields ?? {} });
+      },
+    } as unknown as ILogService);
     ix.stub(IAgentLoopService, { history: () => options.history } as unknown as IAgentLoopService);
     const size = options.contextSize;
     ix.stub(ISessionTokenCountingService, {
@@ -208,5 +231,75 @@ describe('AgentMicroCompactionService', () => {
     await service.prepareForTurnRequest();
     expect(service.active()).toBe(false);
     expect(writes).toEqual([]);
+  });
+
+  it('fires with idle reason after a restored session idled past the cache TTL', async () => {
+    const big = 'x'.repeat(4000);
+    history = [
+      ...exchange('Bash', 'c1', big),
+      ...exchange('Bash', 'c2', big),
+      ...exchange('Bash', 'c3', 'tail'),
+    ];
+    service = buildService({
+      history,
+      contextSize: 500,
+      config: {
+        enabled: true,
+        keepRecent: 1,
+        minResultTokens: 100,
+        triggerTokens: 1000,
+        clearAtLeastTokens: 300,
+        idleMarginSeconds: 300,
+      },
+    });
+
+    // Restored session: the last turn response came from replayed history,
+    // long before the restart.
+    const lastResponseAt = 1_000_000;
+    void dispatcher.dispatch(
+      new UsageRecord(
+        { agentId: 'test-agent', model: 'm', usage: emptyUsage(), usageScope: 'turn' },
+        lastResponseAt,
+      ),
+    );
+
+    await service.prepareForTurnRequest(lastResponseAt + PROMPT_CACHE_TTL_MS + 300_000 + 1);
+
+    await dispatcher.flush();
+    const records: WireRecord[] = [];
+    for await (const record of log.read<WireRecord>(testWireScope(SCOPE, KEY), AGENT_WIRE_RECORD_KEY)) {
+      records.push(record);
+    }
+    const apply = records.find((record) => record.type === 'micro_compaction.apply');
+    expect(apply).toEqual(
+      expect.objectContaining({ reason: 'idle', clearedCount: 2, agentId: 'test-agent' }),
+    );
+  });
+
+  it('logs the path and reason when saving fails, and keeps the result uncleared', async () => {
+    history = [...exchange('Bash', 'c1', 'x'.repeat(4000)), ...exchange('Bash', 'c2', 'tail')];
+    service = buildService({
+      history,
+      contextSize: 2000,
+      failWrites: true,
+      config: {
+        enabled: true,
+        keepRecent: 0,
+        minResultTokens: 100,
+        triggerTokens: 1000,
+        clearAtLeastTokens: 300,
+        idleMarginSeconds: 300,
+      },
+    });
+
+    await service.prepareForTurnRequest();
+
+    expect(writes).toEqual([]);
+    expect(service.active()).toBe(false);
+    expect(warnCalls).toHaveLength(1);
+    expect(warnCalls[0]!.fields['toolCallId']).toBe('c1');
+    expect(String(warnCalls[0]!.fields['path'])).toContain('tool-results');
+    expect(String(warnCalls[0]!.fields['path'])).toContain('Bash-c1');
+    expect(warnCalls[0]!.fields['error']).toBe('disk full');
   });
 });

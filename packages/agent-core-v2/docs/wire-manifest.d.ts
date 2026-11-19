@@ -94,7 +94,7 @@
 //   turn.ended                         changeNotifier.snapshot, interruptionReminder, plan, turn                   src/agent/loop/turnOps.ts
 //   turn.prompt                        changeNotifier.snapshot, interruptionReminder, plan, turn                   src/agent/loop/turnOps.ts
 //   turn.steer                         changeNotifier.snapshot, interruptionReminder, plan, turn                   src/agent/loop/turnOps.ts
-//   usage.record                       (none)                                                                      src/agent/usage/usageOps.ts
+//   usage.record                       microCompaction                                                             src/agent/usage/usageOps.ts
 
 /**
  * states: changeNotifier.snapshot
@@ -1000,7 +1000,7 @@ interface TurnSteerPayload {
 }
 
 /**
- * states: (none)
+ * states: microCompaction
  * owner: src/agent/usage/usageOps.ts
  */
 interface UsageRecordPayload {

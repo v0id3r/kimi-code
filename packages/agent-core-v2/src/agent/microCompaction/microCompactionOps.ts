@@ -7,6 +7,7 @@ import {
   ContextApplyCompaction,
   ContextClear,
 } from '#/agent/contextMemory/contextEvents';
+import { UsageRecord } from '#/agent/usage/usageOps';
 
 export type MicroCompactionReason = 'threshold' | 'idle';
 
@@ -46,9 +47,19 @@ export interface MicroCompactionApply extends AgentDomainTrait {
 
 export interface MicroCompactionState {
   readonly cleared: readonly MicroCompactionClearedEntry[];
+  /**
+   * Time of the last completed turn-scoped model response (from usage.record),
+   * restored by session replay. Drives the idle (cache-cold) trigger, so it
+   * survives restarts; reset by full compaction because the cached prefix is
+   * replaced.
+   */
+  readonly lastTurnResponseAt: number | null;
 }
 
-const emptyMicroCompactionState = (): MicroCompactionState => ({ cleared: [] });
+const emptyMicroCompactionState = (): MicroCompactionState => ({
+  cleared: [],
+  lastTurnResponseAt: null,
+});
 
 export const microCompactionKey = defineState('microCompaction', emptyMicroCompactionState)
   .replayable({
@@ -60,13 +71,19 @@ export const microCompactionKey = defineState('microCompaction', emptyMicroCompa
           tokens: z.number().int().min(0),
         }),
       ),
+      // Absent in state persisted before this field existed.
+      lastTurnResponseAt: z.number().nullable().default(null),
     }),
   })
   .on(MicroCompactionApply, (state, event) => {
     const known = new Set(state.cleared.map((entry) => entry.toolCallId));
     const added = event.cleared.filter((entry) => !known.has(entry.toolCallId));
     if (added.length === 0) return undefined;
-    return { cleared: [...state.cleared, ...added] };
+    return { ...state, cleared: [...state.cleared, ...added] };
+  })
+  .on(UsageRecord, (state, event) => {
+    if (event.usageScope !== 'turn') return undefined;
+    return { ...state, lastTurnResponseAt: event.time };
   })
   .on(ContextApplyCompaction, () => emptyMicroCompactionState())
   .on(ContextClear, () => emptyMicroCompactionState());

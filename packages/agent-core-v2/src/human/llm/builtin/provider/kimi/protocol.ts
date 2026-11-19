@@ -30,8 +30,10 @@ import { normalizeKimiToolSchema } from './schema';
 
 export const KIMI_DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 
-const KIMI_PROMPT_CACHE_OPTIONS = { mode: 'implicit', ttl: '1h' } as const;
-const KIMI_ANTHROPIC_CACHE_CONTROL = { type: 'ephemeral', ttl: '1h' } as const;
+/** Prompt-cache TTL sent to the provider; also drives micro-compaction's idle trigger. */
+export const KIMI_PROMPT_CACHE_TTL = '1h' as const;
+const KIMI_PROMPT_CACHE_OPTIONS = { mode: 'implicit', ttl: KIMI_PROMPT_CACHE_TTL } as const;
+const KIMI_ANTHROPIC_CACHE_CONTROL = { type: 'ephemeral', ttl: KIMI_PROMPT_CACHE_TTL } as const;
 
 export interface KimiThinkingConfig {
   type?: 'enabled' | 'disabled';

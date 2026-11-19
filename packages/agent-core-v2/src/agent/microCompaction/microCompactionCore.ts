@@ -1,12 +1,27 @@
 import type { ContentPart } from '#human/llm/message';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { Message } from '#human/llm/message';
+import { KIMI_PROMPT_CACHE_TTL } from '#/human/llm/builtin/provider/kimi/protocol';
 import type { MicroCompactionReason } from './microCompactionOps';
 import type { MicroCompactionSettings } from './configSection';
 
-// Prompt-cache TTL of the built-in Kimi provider (see
-// human/llm/builtin/provider/kimi/protocol.ts: prompt_cache_options ttl '1h').
-export const PROMPT_CACHE_TTL_MS = 60 * 60 * 1000;
+/**
+ * Prompt-cache TTL of the built-in Kimi provider. Single source of truth:
+ * the same value is sent to the provider in prompt_cache_options (see
+ * human/llm/builtin/provider/kimi/protocol.ts), so the idle trigger cannot
+ * drift from the real cache lifetime.
+ */
+export function parseCacheTtlMs(ttl: string): number {
+  const match = /^(\d+)([smhd])$/.exec(ttl.trim());
+  if (match === null) return 60 * 60 * 1000;
+  const value = Number(match[1]);
+  const unit = match[2];
+  const factor =
+    unit === 's' ? 1000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000;
+  return value * factor;
+}
+
+export const PROMPT_CACHE_TTL_MS = parseCacheTtlMs(KIMI_PROMPT_CACHE_TTL);
 
 // Minimum freed tokens when the trigger is the idle (cache-cold) path.
 export const IDLE_MIN_FREED_TOKENS = 5000;
@@ -30,7 +45,7 @@ export function isMicroCompactionReadableTool(toolName: string): boolean {
 export function microCompactionMarker(outputPath: string): string {
   return (
     `[Old tool result content cleared. Full output saved to: ${outputPath}. ` +
-    'Use Read to view it if needed.]'
+    'Use Read (with offset/limit for large files) to view it if needed.]'
   );
 }
 
@@ -72,7 +87,9 @@ export function selectMicroCompactionCandidates(
       resultIndexes.push(index);
     }
   }
-  const protectedTail = new Set(resultIndexes.slice(-settings.keepRecent));
+  const protectedTail = new Set(
+    settings.keepRecent <= 0 ? [] : resultIndexes.slice(-settings.keepRecent),
+  );
 
   const candidates: MicroCompactionCandidate[] = [];
   for (const index of resultIndexes) {
