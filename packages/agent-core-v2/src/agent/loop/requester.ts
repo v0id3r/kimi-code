@@ -30,8 +30,9 @@ import {
 import type { TurnExecution } from './core/request';
 import { AgentLoopProjector } from './projector';
 import { AgentLoopRequestObserver } from './requestObservation';
-import { createStructureRecovery, createStructureResolver } from './projectionPolicy';
+import { createMicroCompactionResolver, createStructureRecovery, createStructureResolver } from './projectionPolicy';
 import { createToolSelectResolver } from './toolSelectPolicy';
+import { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
 import type { AgentMediaPolicy, AgentMediaPolicyFactory } from './mediaPolicy';
 import {
   contentsOf,
@@ -88,6 +89,7 @@ export class AgentLoopRequestFactory {
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IEventDispatcher dispatcher: IEventDispatcher,
     @ISessionRequestAttributionService attribution: ISessionRequestAttributionService,
+    @IAgentMicroCompactionService private readonly microCompaction: IAgentMicroCompactionService,
   ) {
     this.projector = new AgentLoopProjector((anomalies) => observer.reportProjectionRepairs(anomalies));
     this.requestMetadata = new RequestMetadataTracker(scopeContext, dispatcher, attribution);
@@ -239,6 +241,10 @@ export class AgentLoopRequestFactory {
         ...(mediaPolicy === undefined ? [] : [mediaPolicy.recovery]),
       ],
       resolvers: [
+        createMicroCompactionResolver(
+          this.microCompaction,
+          () => request.source.type === 'turn',
+        ),
         createToolSelectResolver(this.toolSelect, request.dynamicTools),
         ...(mediaPolicy === undefined ? [] : [mediaPolicy.toolResolver]),
         createStructureResolver(this.projector),

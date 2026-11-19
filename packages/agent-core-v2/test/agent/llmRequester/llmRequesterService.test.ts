@@ -27,6 +27,7 @@ import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/
 import type { AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
+import { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { shapeUnsupportedDynamicToolContext } from '#/agent/toolSelect/dynamicTools';
 import { IAgentMediaResolverService } from '#/agent/media/mediaResolver';
@@ -304,6 +305,12 @@ function createService(
   ix.set(ISessionRequestAttributionService, attribution);
   registerTestEventDispatcher(ix);
   ix.set(IAgentStateService, new AgentStateService());
+  ix.stub(IAgentMicroCompactionService, {
+    _serviceBrand: undefined,
+    active: () => false,
+    prepareForTurnRequest: async () => undefined,
+    projectMessages: (messages) => messages,
+  });
   const observer = ix.createInstance(AgentLoopRequestObserver);
   const service = ix.createInstance(
     new SyncDescriptor(AgentLoopRequestFactory, [observer, () => profile as IAgentLoopService]),
