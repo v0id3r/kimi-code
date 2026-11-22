@@ -1,31 +1,3 @@
-/**
- * ACP session (v2) — drives a single main agent over one ACP `sessionId`,
- * through the `Klient` facade. `start.ts` creates the klient over the
- * in-memory transport; everything below goes through facade calls and typed
- * klient events, so swapping the transport (http / ipc) requires no change
- * here.
- *
- * `prompt` submits the user input via `agent.prompt(...)` and translates the
- * agent's scoped event stream — subscribed once per session in `init()`,
- * before the first prompt — into ACP `session/update` notifications via the
- * helpers in `./events-map`. The promise settles on the `turn.ended` event.
- * A submission the engine QUEUES behind another turn (the launch resolves
- * `undefined`) stays open and is tracked by its client-chosen `promptId`:
- * `turn.started` adopts the consuming turn once the queue drains, a
- * `prompt_only` flush rolls into the follow-up turn that actually answers,
- * and `prompt.completed` settles only a hook-blocked prompt that never runs.
- * Turns with no ACP owner (engine-internal notification turns) still stream
- * their events to the client and report their working/idle lifecycle through
- * `_meta.jaz.stateUpdate` — the agent's work stays visible between prompts,
- * matching the CLI.
- *
- * KLIENT GAPS (all reported; each marked `KLIENT-GAP` inline):
- *  - no session MCP connection view / compaction service → the `/mcp` and
- *    `/compact` builtin slash commands answer with an explanatory notice
- *    instead of live data (see `./builtin-commands`).
- *  - no `Turn.result` promise → settlement relies solely on `turn.ended`.
- */
-
 import { randomUUID } from 'node:crypto';
 
 import type {
@@ -127,12 +99,6 @@ function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   };
 }
 
-/**
- * The engine's wire code for "another turn is active". A plain
- * `agent.prompt` while busy is QUEUED by the engine (the RPC returns
- * `undefined`, indistinguishable from a hook-blocked launch), so this code
- * only reaches us from `agent.activateSkill`, which rejects instead.
- */
 const TURN_AGENT_BUSY_CODE = 'turn.agent_busy';
 const SESSION_OCCUPIED_CODE = 'session.occupied';
 const SESSION_STALE_CODE = 'session.stale';
@@ -179,19 +145,11 @@ interface ResolvedCommands {
   readonly skillCommandMap: ReadonlyMap<string, string>;
 }
 
-/** Wire response of the `_session/steering` extension method. */
 export interface SteeringResponse {
   readonly outcome: 'injected' | 'startedNewTurn';
   readonly stopReason: string;
 }
 
-/**
- * Wait-for-completion handle of one `_session/steering` call. Every steer is
- * tracked by its prompt record id to the turn that actually answers it —
- * injected steers too, because steering wraps the host turn up early and the
- * injected content is answered by the follow-up turn (adopt on
- * `turn.started`, roll a `prompt_only` flush into the next turn).
- */
 interface SteerWaiter {
   promptId?: string;
   turnId?: number;
@@ -203,55 +161,13 @@ interface SteerWaiter {
 interface TurnDriver {
   resolve(response: PromptResponse): void;
   reject(error: unknown): void;
-  /**
-   * Client-chosen prompt record id handed to the engine
-   * (`PromptPayload.promptId`), echoed on `turn.started` /
-   * `prompt.completed` / `prompt.aborted` — the handle by which a QUEUED
-   * prompt is tracked. Undefined on the skill-activation path (it never
-   * queues; a busy engine rejects it instead).
-   */
   promptId?: string;
-  /**
-   * Learned once the launch call (`agent.prompt` / `agent.activateSkill`)
-   * resolves, or adopted from `turn.started` for a queued prompt. Events
-   * carry a `turnId`, but until this is set no turn-scoped event can be
-   * attributed to this prompt — and the turn may START (with a fast model
-   * even END) before the launch round-trip delivers the id. Such events are
-   * buffered in {@link early} instead of being dropped.
-   */
   turnId?: number;
   settled: boolean;
   cancelRequested?: boolean;
-  /**
-   * True while the launch round-trip is in flight: the prompt's turn may
-   * already be streaming under an id we do not know yet, so turn-scoped
-   * events buffer in {@link early}. False from the moment the launch
-   * resolves — including the queued outcome, where the wait for
-   * `turn.started` is event-driven and other turns' events must stream live.
-   */
   launchPending: boolean;
-  /**
-   * The engine accepted the prompt but queued it behind another turn (the
-   * launch resolved `undefined`). The driver stays open until events decide
-   * it: `turn.started` with our promptId adopts the consuming turn,
-   * `prompt.completed` settles a hook-blocked prompt that never runs,
-   * `prompt.aborted` settles a cancelled one.
-   */
   queued: boolean;
-  /**
-   * Our prompt's turn ended as `prompt_only`: the engine flushed it into
-   * context without an LLM call because a notification turn was pending
-   * behind it. That follow-up turn answers with our message in context, so
-   * the driver stays open and adopts the next turn that starts.
-   */
   awaitingResponseTurn: boolean;
-  /**
-   * Turn-scoped events that arrived while `turnId` was still unknown during
-   * the launch round-trip. Once the launch resolves, every entry is replayed
-   * in arrival order — the ones matching the driver's turn are its own
-   * (possibly already finished) work, the rest are a still-draining prior
-   * turn, which the live path would have streamed as ownerless traffic.
-   */
   early: Array<{ readonly turnId: number; readonly dispatch: () => void }>;
 }
 
@@ -263,40 +179,18 @@ export class AcpSession {
   private currentModelId: string = '';
   private currentThinkingLevel: string = 'off';
   private reportedUsage: TokenUsage | undefined;
-  /** Current ACP mode. */
   private currentModeId: AcpModeId = DEFAULT_MODE_ID;
   private skills: readonly SkillSummary[] = [];
   private driver: TurnDriver | undefined;
-  /** Live wait-for-completion handles of `_session/steering` calls. */
   private readonly steerWaiters = new Set<SteerWaiter>();
-  /**
-   * FIFO chain serializing model-bound prompt submissions: each waits for
-   * the previous prompt's driver to fully settle before launching, so a
-   * client can type ahead while a turn runs instead of eating
-   * `turn.agent_busy` rejections. Markers let `cancel()` / `dispose()`
-   * settle still-chained prompts as `cancelled` without launching them.
-   */
   private promptChain: Promise<unknown> = Promise.resolve();
   private readonly chainedPrompts = new Set<{ cancelled: boolean }>();
-  /**
-   * Abort markers of prompts still in their pre-turn image-compression phase
-   * (no turn launched yet, so `agent.cancel` has nothing to cancel).
-   * `cancel()` flips every marker; the prompt settles with
-   * `stopReason: 'cancelled'` once compression finishes instead of launching
-   * a turn the client already asked to stop.
-   */
   private readonly pendingPromptAborts = new Set<{ aborted: boolean }>();
   private readonly subscriptions: IDisposable[] = [];
   private readonly toolCallStreamArgs = new Map<string, { args: string }>();
   private readonly toolStatuses = new Map<string, string>();
   private readonly toolLocations = new Map<string, ToolCallLocation[]>();
   private readonly toolDiffs = new Map<string, ToolCallContent>();
-  /**
-   * In-flight Bash tool calls awaiting terminal correlation, keyed by the ACP
-   * wire toolCallId; the value is the model's `args.command`. Filled at
-   * `tool.call.started`, consumed by {@link onTerminalCreated} (or dropped at
-   * `tool.result`).
-   */
   private readonly bashCallsAwaitingTerminal = new Map<string, string>();
   private readonly terminalBackedCalls = new Map<string, string>();
   private readonly interactionBridge: AcpInteractionBridge;
@@ -365,9 +259,6 @@ export class AcpSession {
       events.on('prompt.aborted', (event) => {
         this.onPromptAborted(event);
       }),
-      // Compaction runs as a background LLM task outside any turn, so these
-      // are not turn-scoped; the subscription is already agent-grained (this
-      // session's main agent), which keeps other sessions' events out.
       events.on('compaction.started', (event) => {
         this.onCompactionStarted(event);
       }),
@@ -402,7 +293,6 @@ export class AcpSession {
       this.currentThinkingLevel = await this.agent.getThinking();
       this.reportedUsage = (await this.agent.getUsage()).total;
     } catch (error) {
-      // Keep the unbound defaults — configOptions stays honest.
       log.warn('acp: could not seed model/thinking/usage state', {
         sessionId: this.sessionId,
         error: error instanceof Error ? error.message : String(error),
@@ -540,13 +430,6 @@ export class AcpSession {
     return this.enqueuePrompt(() => this.driveTurn(content));
   }
 
-  /**
-   * Run a model-bound launch after every previously submitted prompt fully
-   * settled. This is the client-visible queue: the engine may additionally
-   * queue a submission behind its own internal turns (see {@link
-   * TurnDriver.queued}), but two ACP prompts never overlap. Cancelled
-   * markers settle as `cancelled` when the chain reaches them.
-   */
   private enqueuePrompt(task: () => Promise<PromptResponse>): Promise<PromptResponse> {
     const marker = { cancelled: false };
     this.chainedPrompts.add(marker);
@@ -559,18 +442,9 @@ export class AcpSession {
     return run;
   }
 
-  /**
-   * ACP `_session/steering`: hand the message to the engine's steer path.
-   * When a turn is running the engine injects the content into it
-   * (`outcome: 'injected'` — the current answer absorbs it at the next step
-   * boundary); otherwise the prompt starts its own turn now or after the
-   * queue drains (`outcome: 'startedNewTurn'`). With `waitForCompletion`
-   * the call settles with that turn's stop reason.
-   */
   async steer(blocks: readonly ContentBlock[], waitForCompletion: boolean): Promise<SteeringResponse> {
     const content = await this.preparePromptContent(blocks);
     if (content === undefined) {
-      // Cancelled while compressing (see `cancel()`).
       return { outcome: 'startedNewTurn', stopReason: 'cancelled' };
     }
     let result: SteerResult;
@@ -586,10 +460,6 @@ export class AcpSession {
     if (!waitForCompletion) {
       return { outcome, stopReason: 'end_turn' };
     }
-    // Settlement tracks the steered prompt's OWN turn, never the host turn:
-    // steering wraps the host turn up early (the engine restarts with the
-    // injected content), so the answer lands in the follow-up turn — which
-    // `turn.started` hands to us via the prompt record id.
     return new Promise<SteeringResponse>((resolve) => {
       const waiter: SteerWaiter = {
         promptId: result.prompt_id,
@@ -607,14 +477,6 @@ export class AcpSession {
     });
   }
 
-  /**
-   * Convert the ACP blocks to engine content parts and run the input-stage
-   * image compression (see `compressPromptImageParts`). Compression happens
-   * before any turn exists, so honor a `session/cancel` that arrives during
-   * it: `cancel()` flips the marker and this returns `undefined` rather than
-   * launching a turn the client already asked to stop. Returns the compressed
-   * parts otherwise.
-   */
   private async preparePromptContent(
     blocks: readonly ContentBlock[],
   ): Promise<readonly ContentPart[] | undefined> {
@@ -697,15 +559,6 @@ export class AcpSession {
     return buildAcpSkillSlashCommands(this.skills).commandMap;
   }
 
-  /**
-   * Invariant guard: a model-bound launch must never overlap the in-flight
-   * driver. {@link enqueuePrompt} serializes submissions, so this cannot
-   * fire from the normal flow — it stays as the synchronous safety net
-   * against a driver-assignment race, which would overwrite the in-flight
-   * driver and leave the first prompt unsettled with both turns' events
-   * unattributed (the failure the legacy adapter rejected with
-   * `turn.agent_busy` → -32600).
-   */
   private assertNoActiveTurn(): void {
     if (this.driver !== undefined && !this.driver.settled) {
       throw RequestError.invalidRequest(
@@ -715,28 +568,12 @@ export class AcpSession {
     }
   }
 
-  /**
-   * Submit the prompt and drive the turn to completion: `agent.prompt()`
-   * returns the launched turn id, which the session-level event handlers use
-   * to attribute events to this driver. The promptId is client-chosen so a
-   * QUEUED submission (busy engine → launch resolves `undefined`) can be
-   * tracked to its consuming turn via `turn.started` (see {@link
-   * onTurnStarted}). Settles on `turn.ended`.
-   */
   private driveTurn(input: readonly ContentPart[]): Promise<PromptResponse> {
     this.assertNoActiveTurn();
     const promptId = `acp-${randomUUID()}`;
     return this.driveLaunch(this.agent.prompt({ input, promptId }), promptId);
   }
 
-  /**
-   * Shared turn settlement for every launch path (`agent.prompt`,
-   * `agent.activateSkill`): a returned turn id attributes subsequent events
-   * to this driver. `undefined` means the engine QUEUED the prompt behind
-   * another turn or a submit hook blocked it — indistinguishable at this
-   * point, so the driver stays open and the event stream decides
-   * ({@link onTurnStarted} / {@link onPromptCompleted}).
-   */
   private driveLaunch(launch: Promise<PromptLaunchResult>, promptId?: string): Promise<PromptResponse> {
     return new Promise<PromptResponse>((resolve, reject) => {
       const driver: TurnDriver = {
@@ -755,9 +592,6 @@ export class AcpSession {
           if (driver.settled) return;
           driver.launchPending = false;
           if (launched === undefined) {
-            // Queued or hook-blocked: keep the prompt open and wait for the
-            // engine's events. A cancel that already arrived is re-issued
-            // against the queued prompt precisely.
             driver.queued = true;
             if (driver.cancelRequested === true) {
               this.cancelQueuedPrompt(driver);
@@ -773,11 +607,6 @@ export class AcpSession {
               });
             });
           }
-          // Replay the events the turn emitted before its id arrived (a fast
-          // turn can outrun the launch round-trip — `activateSkill` returns
-          // only after the prompt-metadata update). Non-matching entries are
-          // a still-draining prior turn; the live handlers stream those as
-          // ownerless traffic, so replay everything in arrival order.
           for (const early of driver.early.splice(0)) {
             early.dispatch();
           }
@@ -791,11 +620,6 @@ export class AcpSession {
     });
   }
 
-  /**
-   * Best-effort cancel of a prompt still sitting in the engine's queue. A
-   * prompt that already launched rejects (`prompt.not_found`) — its
-   * `turn.started` adoption re-cancels by turn id instead.
-   */
   private cancelQueuedPrompt(driver: TurnDriver): void {
     if (driver.promptId === undefined) return;
     void this.agent.cancelPrompt({ promptId: driver.promptId }).catch((error: unknown) => {
@@ -806,13 +630,6 @@ export class AcpSession {
     });
   }
 
-  /**
-   * Route a turn-scoped event: buffer it only while the launch round-trip is
-   * in flight with the turn id still unknown (see {@link TurnDriver.early}).
-   * Everything else dispatches live — including events of turns no ACP
-   * prompt owns (engine-internal notification turns), which stream to the
-   * client so the agent's work stays visible between prompts.
-   */
   private dispatchTurnEvent(turnId: number, dispatch: () => void): void {
     const driver = this.driver;
     if (
@@ -851,8 +668,6 @@ export class AcpSession {
   }
 
   private onToolCallStarted(event: AgentEventPayloads['tool.call.started']): void {
-    // The klient payload mirrors `ToolCallStartedEvent` (`args` / `display`
-    // arrive as `unknown` — cast at this seam).
     const mapped = event as unknown as ToolCallStartedEvent;
     const key = acpToolCallId(event.turnId, event.toolCallId);
     const locations = toolCallLocations(mapped.name, mapped.args, mapped.display);
@@ -887,7 +702,6 @@ export class AcpSession {
   }
 
   private onToolCallDelta(event: AgentEventPayloads['tool.call.delta']): void {
-    // The klient payload mirrors `ToolCallDeltaEvent` field-for-field.
     const mapped = event as unknown as ToolCallDeltaEvent;
     const key = acpToolCallId(event.turnId, event.toolCallId);
     const acc = this.toolCallStreamArgs.get(key);
@@ -896,8 +710,6 @@ export class AcpSession {
       this.emitTurn(event.turnId, toolCallLazyCreateToSessionUpdate(this.sessionId, mapped));
       return;
     }
-    // Subsequent delta — the helper accumulates the fragment and emits an
-    // update with the cumulative args text (REPLACE-content semantics).
     this.emitTurn(event.turnId, toolCallDeltaToSessionUpdate(this.sessionId, mapped, acc));
   }
 
@@ -906,9 +718,6 @@ export class AcpSession {
     const status = event.fields['status'];
     if (typeof status !== 'string' || status.length === 0 || this.toolStatuses.get(key) === status) return;
     this.toolStatuses.set(key, status);
-    // The klient payload mirrors `ToolUpdatedEvent` field-for-field; the
-    // helper forwards only `status` updates with text (as a title refresh)
-    // and returns null for everything else, which `emit` drops.
     this.emitTurn(
       event.turnId,
       toolUpdatedToSessionUpdate(this.sessionId, event as unknown as ToolUpdatedEvent),
@@ -927,10 +736,6 @@ export class AcpSession {
     const terminalId = this.terminalBackedCalls.get(key);
     this.terminalBackedCalls.delete(key);
     if (terminalId !== undefined) {
-      // Terminal-backed call: the client already renders the output bytes in
-      // the terminal pane, so the card gets the terminal embed instead of a
-      // textual copy. The full output still reached the model (and the
-      // persisted wire record) untouched.
       this.emitTurn(event.turnId, {
         sessionId: this.sessionId,
         update: {
@@ -1000,15 +805,6 @@ export class AcpSession {
     });
   }
 
-  /**
-   * Adopt turns for the waiting driver. Two cases: the queue drained to OUR
-   * queued prompt (`turn.started` echoes its promptId), or the driver is
-   * between a `prompt_only` flush and the follow-up turn that actually
-   * answers (any `turn.started` — the engine schedules the pending
-   * notification turn next, and it carries our message in context). The
-   * event stream is ordered, so adoption lands before the turn's first
-   * delta and every later event attributes through `driverFor`.
-   */
   private onTurnStarted(event: AgentEventPayloads['turn.started']): void {
     const driver = this.driver;
     if (driver === undefined || driver.settled || driver.turnId !== undefined) {
@@ -1019,8 +815,6 @@ export class AcpSession {
       driver.queued = false;
       driver.turnId = event.turnId;
       if (driver.cancelRequested === true) {
-        // The queued-prompt cancel raced the launch (see `cancel()`): the
-        // turn started anyway, so cancel it precisely addressed.
         void this.agent.cancel({ turnId: event.turnId }).catch((error: unknown) => {
           log.warn('acp: deferred cancel of an adopted turn failed', {
             sessionId: this.sessionId,
@@ -1051,13 +845,6 @@ export class AcpSession {
     }
   }
 
-  /**
-   * Settle a driver whose prompt the engine finished without a turn. Only
-   * the no-turn outcome settles here (a hook-blocked submission: the launch
-   * resolved `undefined` and no `turn.started` followed). Once a turn was
-   * adopted — or a `prompt_only` flush rolled the driver into the follow-up
-   * turn — this event is bookkeeping and `turn.ended` governs settlement.
-   */
   private onPromptCompleted(event: AgentEventPayloads['prompt.completed']): void {
     this.settleSteerWaitersByPrompt(event.promptId, 'end_turn');
     const driver = this.driver;
@@ -1077,7 +864,6 @@ export class AcpSession {
     }
   }
 
-  /** Settle a driver whose queued prompt was cancelled before it ran. */
   private onPromptAborted(event: AgentEventPayloads['prompt.aborted']): void {
     this.settleSteerWaitersByPrompt(event.promptId, 'cancelled');
     const driver = this.driver;
@@ -1108,10 +894,6 @@ export class AcpSession {
       return;
     }
     if (event.stopReason === 'prompt_only') {
-      // Context flush, not an answer: the engine appended the queued prompt
-      // without an LLM call because a notification turn was pending behind
-      // it. Keep the prompt open and adopt that follow-up turn when it
-      // starts (see `onTurnStarted`) — its streamed work IS the response.
       driver.turnId = undefined;
       driver.awaitingResponseTurn = true;
       return;
@@ -1127,16 +909,6 @@ export class AcpSession {
     void this.emitUsageUpdate(event.turnId);
   }
 
-  /**
-   * Push a one-shot `usage_update` after a turn settles: `used` = the agent's
-   * current context token count, `size` = the bound model's max context size
-   * from the catalog. Skipped while no catalog model matches the bound id —
-   * there is nothing honest to report. `cost` stays omitted (the engine has
-   * no cost data). Tokens recorded since the previous report ride
-   * `_meta.usage` (OpenAI/Codex vocabulary) under a fresh `_meta.usageId`;
-   * a getUsage failure or no new tokens falls back to the plain {used, size}
-   * shape.
-   */
   private async emitUsageUpdate(turnId?: number): Promise<void> {
     try {
       const size = (await this.klient.global.kosong.listModels()).find(
@@ -1156,13 +928,6 @@ export class AcpSession {
     }
   }
 
-  /**
-   * The session tokens recorded since the previous report (or since `init`,
-   * so a resumed session does not re-report its history), mapped to the
-   * OpenAI/Codex field names the host parses. Hosts count each `usageId`
-   * once, so every report is a disjoint slice of the session total. Returns
-   * undefined when nothing new was recorded or getUsage failed.
-   */
   private async usageReport(): Promise<AcpUsageReport | undefined> {
     let total: TokenUsage | undefined;
     try {
@@ -1217,12 +982,6 @@ export class AcpSession {
     });
   }
 
-  /**
-   * Push a turn-scoped `session/update` with the engine's turn id attached as
-   * `update._meta.turnId` (extension). Hosts use it to attribute and merge
-   * streamed work by engine turn — crucial for ownerless turns (background
-   * task notifications), which have no client prompt to key on.
-   */
   private emitTurn(turnId: number | undefined, notification: SessionNotification | null): void {
     if (notification === null) return;
     if (turnId !== undefined) {
@@ -1232,12 +991,6 @@ export class AcpSession {
     this.emit(notification);
   }
 
-  /**
-   * Cancel the in-flight turn, if any; abort every prompt still in its
-   * pre-turn compression phase (those settle as cancelled without launching —
-   * see {@link preparePromptContent}); and settle every prompt still waiting
-   * in the local submission chain as cancelled. Idempotent.
-   */
   cancel(): void {
     for (const pending of this.pendingPromptAborts) {
       pending.aborted = true;
@@ -1270,31 +1023,18 @@ export class AcpSession {
       return;
     }
     if (driver.awaitingResponseTurn) {
-      // Between the prompt_only flush and the follow-up turn: nothing of
-      // ours is running, so settle locally. The follow-up turn belongs to
-      // the engine's queue, not to this prompt, and stays untouched.
       this.settleDriver(driver, () => {
         driver.resolve({ stopReason: 'cancelled' });
       });
       return;
     }
     if (driver.queued) {
-      // Sitting in the engine's queue: settle now and drop the queued prompt
-      // precisely. A racing `turn.started` re-cancels by turn id (see
-      // `onTurnStarted`); a late `prompt.aborted` finds the driver settled.
       this.settleDriver(driver, () => {
         driver.resolve({ stopReason: 'cancelled' });
       });
       this.cancelQueuedPrompt(driver);
       return;
     }
-    // The launch round-trip has not returned the turn id yet. The engine's
-    // cancel payload makes turnId optional — an empty call cancels whatever
-    // turn is active (the same contract kap-server's cancel route relies
-    // on) — and concurrent prompts are rejected, so the active turn can only
-    // be this driver's. Flag the driver too: when the id lands, the launch
-    // handler re-issues a precisely-addressed cancel, and a no-launch
-    // outcome settles `cancelled` instead of `end_turn`.
     void this.agent.cancel().catch((error: unknown) => {
       log.warn('acp: cancel (unaddressed) failed', {
         sessionId: this.sessionId,
