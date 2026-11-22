@@ -11,7 +11,7 @@ import {
   MicroCompactionApply,
 } from '#/agent/microCompaction/microCompactionOps';
 import { UsageRecord } from '#/agent/usage/usageOps';
-import { emptyUsage } from '#human/llm-requester/usage';
+import { emptyUsage } from '@moonshot-ai/core/llm/usage';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';

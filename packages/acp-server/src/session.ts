@@ -766,7 +766,7 @@ export class AcpSession {
           }
           driver.turnId = launched.turn_id;
           if (driver.cancelRequested === true) {
-            void this.agent.cancel({ turnId: launched.turn_id }).catch((error) => {
+            void this.agent.cancel({ turnId: launched.turn_id }).catch((error: unknown) => {
               log.warn('acp: deferred cancel failed', {
                 sessionId: this.sessionId,
                 error: error instanceof Error ? error.message : String(error),
@@ -782,7 +782,7 @@ export class AcpSession {
             early.dispatch();
           }
         },
-        (error) => {
+        (error: unknown) => {
           this.settleDriver(driver, () => {
             reject(mapPromptLaunchError(error, this.sessionId));
           });
@@ -798,7 +798,7 @@ export class AcpSession {
    */
   private cancelQueuedPrompt(driver: TurnDriver): void {
     if (driver.promptId === undefined) return;
-    void this.agent.cancelPrompt({ promptId: driver.promptId }).catch((error) => {
+    void this.agent.cancelPrompt({ promptId: driver.promptId }).catch((error: unknown) => {
       log.warn('acp: queued-prompt cancel failed', {
         sessionId: this.sessionId,
         error: error instanceof Error ? error.message : String(error),
@@ -1021,7 +1021,7 @@ export class AcpSession {
       if (driver.cancelRequested === true) {
         // The queued-prompt cancel raced the launch (see `cancel()`): the
         // turn started anyway, so cancel it precisely addressed.
-        void this.agent.cancel({ turnId: event.turnId }).catch((error) => {
+        void this.agent.cancel({ turnId: event.turnId }).catch((error: unknown) => {
           log.warn('acp: deferred cancel of an adopted turn failed', {
             sessionId: this.sessionId,
             error: error instanceof Error ? error.message : String(error),
@@ -1209,7 +1209,7 @@ export class AcpSession {
 
   private emit(notification: SessionNotification | null): void {
     if (notification === null) return;
-    void this.conn.sessionUpdate(notification).catch((error) => {
+    void this.conn.sessionUpdate(notification).catch((error: unknown) => {
       log.warn('acp: failed to push session/update', {
         sessionId: this.sessionId,
         error: error instanceof Error ? error.message : String(error),
@@ -1247,7 +1247,7 @@ export class AcpSession {
     }
     for (const waiter of this.steerWaiters) {
       if (waiter.promptId !== undefined && waiter.turnId === undefined && !waiter.awaitingNextTurn) {
-        void this.agent.cancelPrompt({ promptId: waiter.promptId }).catch((error) => {
+        void this.agent.cancelPrompt({ promptId: waiter.promptId }).catch((error: unknown) => {
           log.warn('acp: steered-prompt cancel failed', {
             sessionId: this.sessionId,
             error: error instanceof Error ? error.message : String(error),
@@ -1261,7 +1261,7 @@ export class AcpSession {
     driver.cancelRequested = true;
     const turnId = driver.turnId;
     if (turnId !== undefined) {
-      void this.agent.cancel({ turnId }).catch((error) => {
+      void this.agent.cancel({ turnId }).catch((error: unknown) => {
         log.warn('acp: cancel failed', {
           sessionId: this.sessionId,
           error: error instanceof Error ? error.message : String(error),
@@ -1295,7 +1295,7 @@ export class AcpSession {
     // be this driver's. Flag the driver too: when the id lands, the launch
     // handler re-issues a precisely-addressed cancel, and a no-launch
     // outcome settles `cancelled` instead of `end_turn`.
-    void this.agent.cancel().catch((error) => {
+    void this.agent.cancel().catch((error: unknown) => {
       log.warn('acp: cancel (unaddressed) failed', {
         sessionId: this.sessionId,
         error: error instanceof Error ? error.message : String(error),

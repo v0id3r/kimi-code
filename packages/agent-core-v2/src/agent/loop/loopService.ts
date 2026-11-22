@@ -21,12 +21,13 @@ import {
   type ResolvedRequestContext,
 } from './requesterContract';
 import { AgentLoopProjector } from './projector';
-import { createStructureRecovery, createStructureResolver } from './projectionPolicy';
+import { createMicroCompactionResolver, createStructureRecovery, createStructureResolver } from './projectionPolicy';
 import { createToolSelectResolver } from './toolSelectPolicy';
 import { RequestMetadataTracker, requestMetadataHeaders } from './requestMetadata';
 import { IAgentMediaResolverService } from '#/agent/media/mediaResolver';
 import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
+import { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
 import { READ_MEDIA_FILE_TOOL_NAME } from '#/agent/tools/read-media-file/read-media-file';
 import { IModelCatalog } from '#/llm-adapter/model/catalog';
 import type { ModelOverrides } from '#/llm-adapter/model/model.types';
@@ -324,6 +325,10 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
 
   private get toolSelect(): IAgentToolSelectService {
     return this.instantiation.invokeFunction((accessor) => accessor.get(IAgentToolSelectService));
+  }
+
+  private get microCompaction(): IAgentMicroCompactionService {
+    return this.instantiation.invokeFunction((accessor) => accessor.get(IAgentMicroCompactionService));
   }
 
   data(): ProfileData {
@@ -708,6 +713,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
         mediaPolicy.recovery,
       ],
       resolvers: [
+        createMicroCompactionResolver(this.microCompaction, () => request.source.type === 'turn'),
         createToolSelectResolver(this.toolSelect, request.dynamicTools),
         mediaPolicy.toolResolver,
         createStructureResolver(this.projector),

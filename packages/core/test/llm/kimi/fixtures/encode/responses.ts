@@ -18,6 +18,7 @@ export const kimiResponsesEncodeFixtures = [{
   expected: {
     params: {
       model: 'kimi-for-coding',
+      prompt_cache_options: { mode: 'implicit', ttl: '1h' },
       input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }],
       store: false,
       max_output_tokens: 700,

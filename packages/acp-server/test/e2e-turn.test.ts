@@ -7,7 +7,7 @@ import { getLiveSessionById, IAgentLifecycleService, IEventBus } from '@moonshot
 import { IAgentLoopService } from '@moonshot-ai/agent-core-v2/agent/loop/loop';
 import type { PromptOrigin } from '@moonshot-ai/agent-core-v2/agent/contextMemory/types';
 import { ToolUpdated } from '@moonshot-ai/agent-core-v2/agent/toolExecutor/toolExecutorEvents';
-import { createUserEntry } from '@moonshot-ai/agent-core-v2/human/agent/turn';
+import { createUserMessage } from '@moonshot-ai/core/llm/message';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { mapPromptLaunchError } from '../src/session';
@@ -113,10 +113,10 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
   it('maps the engine token usage onto usage_update _meta.usage (OpenAI/Codex fields)', async () => {
     const c = await boot();
     scripted!.mockNextTextWithUsage('token report', {
-      inputOther: 11,
+      inputOther: 18,
       output: 5,
       inputCacheRead: 30,
-      inputCacheCreation: 7,
+      inputCacheCreation: 0,
     });
 
     const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
@@ -139,7 +139,7 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       outputTokens: 5,
       totalTokens: 53,
       cacheReadInputTokens: 30,
-      cacheCreationInputTokens: 7,
+      cacheCreationInputTokens: 0,
     });
   }, 30_000);
 
@@ -683,10 +683,10 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     const loop = agentHandle?.accessor.get(IAgentLoopService);
     expect(loop).toBeDefined();
     loop!.notify(
-      createUserEntry(
-        { role: 'user', content: [{ type: 'text', text }] },
-        { promptId, origin: { kind: 'injection', variant: 'test_notification' } as PromptOrigin },
-      ),
+      createUserMessage(text, {
+        promptId,
+        origin: { kind: 'injection', variant: 'test_notification' } as PromptOrigin,
+      }),
     );
   }
 

@@ -1,7 +1,6 @@
-import type { ContentPart } from '#human/llm/message';
+import type { ContentPart, Message } from '@moonshot-ai/core/llm/message';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import type { Message } from '#human/llm/message';
-import { KIMI_PROMPT_CACHE_TTL } from '#/human/llm/builtin/provider/kimi/protocol';
+import { KIMI_PROMPT_CACHE_TTL } from '@moonshot-ai/core/llm/builtin/provider/kimi/protocol';
 import type { MicroCompactionReason } from './microCompactionOps';
 import type { MicroCompactionSettings } from './configSection';
 

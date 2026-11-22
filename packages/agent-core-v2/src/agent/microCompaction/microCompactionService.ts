@@ -13,7 +13,7 @@ import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTok
 import { agentContextOfScope, IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import type { Message } from '#human/llm/message';
+import type { Message } from '@moonshot-ai/core/llm/message';
 import { join } from 'pathe';
 
 import { IAgentMicroCompactionService } from './microCompaction';

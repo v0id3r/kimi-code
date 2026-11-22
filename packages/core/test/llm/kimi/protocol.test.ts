@@ -4,7 +4,7 @@ import {
   kimiAnthropicProtocol,
   kimiOpenAIProtocol,
   kimiResponsesProtocol,
-} from '#human/llm/builtin/provider/kimi/protocol';
+} from '#/llm/builtin/provider/kimi/protocol';
 
 const model = { spec: { provider: 'kimi', name: 'kimi-k3.1-pro' } };
 const content = {

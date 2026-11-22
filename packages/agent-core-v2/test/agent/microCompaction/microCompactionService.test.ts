@@ -20,7 +20,7 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { ILogService } from '#/_base/log/log';
 import { UsageRecord } from '#/agent/usage/usageOps';
-import { emptyUsage } from '#human/llm-requester/usage';
+import { emptyUsage } from '@moonshot-ai/core/llm/usage';
 import { microCompactionKey } from '#/agent/microCompaction/microCompactionOps';
 import { microCompactionMarker, PROMPT_CACHE_TTL_MS } from '#/agent/microCompaction/microCompactionCore';
 import {
@@ -62,7 +62,7 @@ function textOf(message: ContextMessage): string {
 }
 
 class IdempotentAgentStateService extends AgentStateService {
-  override contributeState<T>(key: Parameters<AgentStateService['contributeState']>[0]): IDisposable {
+  override contributeState(key: Parameters<AgentStateService['contributeState']>[0]): IDisposable {
     if (this.has(key)) return toDisposable(() => {});
     return super.contributeState(key);
   }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import type { Message } from '#human/llm/message';
+import type { Message } from '@moonshot-ai/core/llm/message';
 import {
   IDLE_MIN_FREED_TOKENS,
   isMicroCompactionReadableTool,
@@ -231,12 +231,10 @@ describe('projectMicroCompaction', () => {
     const projected = projectMicroCompaction(messages, clearedPaths);
     expect(projected).toHaveLength(messages.length);
     const cleared = projected[2]!;
-    expect(cleared.role).toBe('tool');
-    if (cleared.role === 'tool') {
-      expect(cleared.content).toEqual([
-        { type: 'text', text: microCompactionMarker('/tmp/results/c1.txt') },
-      ]);
-    }
+    expect(cleared).toMatchObject({
+      role: 'tool',
+      content: [{ type: 'text', text: microCompactionMarker('/tmp/results/c1.txt') }],
+    });
     expect(projected[3]).toBe(messages[3]);
     expect(projected[4]).toBe(messages[4]);
   });

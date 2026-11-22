@@ -4,107 +4,14 @@ import {
   type Model,
   ProtocolAdapterRegistry,
 } from '@moonshot-ai/agent-core-v2';
-import type { Message, StreamedMessagePart } from '@moonshot-ai/agent-core-v2/human/llm/message';
-import type { FinishReason } from '@moonshot-ai/agent-core-v2/human/llm-requester/finish-reason';
-import type { LlmRequester } from '@moonshot-ai/agent-core-v2/human/llm-requester/requester';
-import { coreRequesterFromA } from '../../../agent-core-v2/test/harness/scripted-generate.js';
-
-interface ScriptedResponse {
-  readonly parts: readonly StreamedMessagePart[];
-  readonly finishReason?: FinishReason | null;
-  readonly rawFinishReason?: string | null;
-  readonly usage?: TokenUsage;
-  readonly gate?: Promise<void>;
-}
-
-function raceAbort(gate: Promise<void>, signal?: AbortSignal): Promise<void> {
-  if (signal === undefined) return gate;
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('aborted'));
-  return Promise.race([
-    gate,
-    new Promise((_, reject) => {
-      signal.addEventListener(
-        'abort',
-        () => {
-          reject(signal.reason ?? new Error('aborted'));
-        },
-        { once: true },
-      );
-    }),
-  ]);
-}
-
-const ZERO_USAGE: TokenUsage = {
-  inputOther: 0,
-  output: 0,
-  inputCacheRead: 0,
-  inputCacheCreation: 0,
-};
-
-class ScriptedStream {
-  id: string | null = null;
-  usage: TokenUsage | null = null;
-  finishReason: FinishReason | null = null;
-  rawFinishReason: string | null = null;
-
-  constructor(
-    private readonly parts: readonly StreamedMessagePart[],
-    private readonly response: ScriptedResponse,
-    private readonly index: number,
-    private readonly signal?: AbortSignal,
-  ) {}
-
-  async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
-    if (this.response.gate !== undefined) await raceAbort(this.response.gate, this.signal);
-    for (const part of this.parts) {
-      yield part;
-    }
-    const hasToolCall = this.parts.some((p) => p.type === 'function');
-    this.id = `scripted-${String(this.index)}`;
-    this.usage = this.response.usage ?? { ...ZERO_USAGE, output: this.parts.length };
-    this.finishReason =
-      this.response.finishReason ?? (hasToolCall ? 'tool_calls' : 'completed');
-    this.rawFinishReason =
-      this.response.rawFinishReason ?? (this.finishReason === 'completed' ? 'stop' : this.finishReason);
-  }
-}
-
-class ScriptedChatProvider {
-  readonly name = 'scripted';
-  readonly modelName = 'scripted';
-  readonly thinkingEffort = null;
-
-  constructor(
-    private readonly queue: ScriptedResponse[],
-    private readonly calls: Array<readonly Message[]>,
-  ) {}
-
-  async generate(
-    _systemPrompt: string,
-    _tools: readonly Tool[],
-    history: readonly Message[],
-    options?: { signal?: AbortSignal },
-  ): Promise<ScriptedStream> {
-    options?.signal?.throwIfAborted();
-    const response = this.queue.shift();
-    if (response === undefined) {
-      throw new Error(
-        `scriptedProvider: unexpected generate() call #${String(this.calls.length + 1)} — ` +
-          `queue exhausted. Push another response via mockNextResponse().`,
-      );
-    }
-    this.calls.push(history);
-    return new ScriptedStream(response.parts, response, this.calls.length, options?.signal);
-  }
-
-  withThinking(): ScriptedChatProvider {
-    return this;
-  }
-
-  withMaxCompletionTokens(): ScriptedChatProvider {
-    return this;
-  }
-}
+import type { Message, StreamedMessagePart } from '@moonshot-ai/core/llm/message';
+import type { FinishReason } from '@moonshot-ai/core/llm/response';
+import type { TokenUsage } from '@moonshot-ai/core/llm/usage';
+import {
+  createMockProvider,
+  withMockProvider,
+  type MockProviderResponse,
+} from '../../../agent-core-v2/test/harness/scripted-generate.js';
 
 export interface ScriptedProvider {
   readonly seed: readonly [typeof IProtocolAdapterRegistry, IProtocolAdapterRegistryType];
@@ -122,51 +29,43 @@ export interface ScriptedProvider {
   systemPrompts(): readonly string[];
 }
 
+function raceAbort(gate: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+  return Promise.race([
+    gate,
+    new Promise<void>((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')), { once: true });
+    }),
+  ]);
+}
+
 export function createScriptedProvider(): ScriptedProvider {
-  const queue: MockProviderResponse[] = [];
+  const queue: Array<MockProviderResponse & { readonly gate?: Promise<void> }> = [];
   const calls: Array<readonly Message[]> = [];
   const systemPrompts: string[] = [];
-  const provider = new ScriptedChatProvider(queue, calls);
-  const requester: LlmRequester = {
-    async generate(config, content, control) {
-      systemPrompts.push(config.systemPrompt ?? '');
-      control.onEvent?.({ type: 'llm.sent' });
-      try {
-        const stream = await provider.generate(
-          config.systemPrompt ?? '',
-          [...(config.tools ?? [])],
-          content.messages,
-          { signal: control.signal },
-        );
-        for await (const part of stream) {
-          control.onEvent?.({ type: 'llm.streaming.part', part });
-          control.signal.throwIfAborted();
-        }
-        control.onEvent?.({ type: 'llm.streaming.usage', usage: stream.usage ?? ZERO_USAGE });
-        control.onEvent?.({
-          type: 'llm.streaming.finish',
-          finish: {
-            finishReason: stream.finishReason,
-            rawFinishReason: stream.rawFinishReason,
-          },
-        });
-        if (stream.id !== null) {
-          control.onEvent?.({ type: 'llm.streaming.message_id', messageId: stream.id });
-        }
-        control.onEvent?.({ type: 'llm.done' });
-      } catch (error) {
-        if (control.signal.aborted) throw error;
-        control.onEvent?.({
-          type: 'llm.failed.remote',
-          error: {
-            kind: 'unknown',
-            message: error instanceof Error ? error.message : String(error),
-            retryable: false,
-          },
-        });
-      }
-    },
-  };
+  const provider = createMockProvider(async (request, signal) => {
+    signal.throwIfAborted();
+    systemPrompts.push(request.profile?.systemPrompt ?? '');
+    const response = queue.shift();
+    if (response === undefined) {
+      throw new Error(
+        `scriptedProvider: unexpected generate() call #${String(calls.length + 1)} — ` +
+          'queue exhausted. Push another response via mockNextResponse().',
+      );
+    }
+    calls.push(structuredClone(request.content.messages));
+    if (response.gate !== undefined) await raceAbort(response.gate, signal);
+    return {
+      ...response,
+      id: response.id ?? `scripted-${String(calls.length)}`,
+      usage: response.usage ?? {
+        inputOther: 0,
+        output: response.parts?.length ?? 0,
+        inputCacheRead: 0,
+        inputCacheCreation: 0,
+      },
+    };
+  });
   const real = new ProtocolAdapterRegistry();
   const registry: IProtocolAdapterRegistryType = {
     _serviceBrand: undefined,

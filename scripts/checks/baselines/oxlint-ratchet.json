@@ -1074,7 +1074,6 @@
     "apps/vscode/src/bridge-handler.ts": 1,
     "apps/vscode/src/extension.ts": 2,
     "apps/vscode/src/managers/file.manager.ts": 1,
-    "packages/acp-server/src/session.ts": 5,
     "packages/agent-core-v2/src/_base/event.ts": 1,
     "packages/agent-core-v2/src/agent/loop/loopService.ts": 1,
     "packages/agent-core-v2/src/agent/mcp/mcpService.ts": 2,
