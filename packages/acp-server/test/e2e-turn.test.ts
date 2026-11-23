@@ -882,6 +882,100 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     expect(chunkTexts(c)).toContain('notify two answers the question');
   }, 30_000);
 
+  type WorkUpdate = {
+    sessionUpdate?: string;
+    asyncTaskId?: string;
+    state?: string;
+    _meta?: { jaz?: { stateUpdate?: { state?: string; tasks?: string[] } } };
+  };
+
+  const workUpdates = (c: TestClient): WorkUpdate[] =>
+    c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: WorkUpdate }).update ?? {})
+      .filter((u) => u._meta?.jaz?.stateUpdate !== undefined || u.asyncTaskId !== undefined);
+
+  const backgroundSleep = (id: string, seconds: number) => ({
+    type: 'function' as const,
+    id,
+    name: 'Bash',
+    arguments: JSON.stringify({ command: `sleep ${seconds}`, description: 'nap', run_in_background: true }),
+  });
+
+  async function bootBackground(): Promise<{ c: TestClient; sessionId: string }> {
+    const c = await boot();
+    c.onRequest('session/request_permission', () => ({
+      outcome: { outcome: 'selected', optionId: 'approve_once' },
+    }));
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    return { c, sessionId: created.sessionId };
+  }
+
+  it('answers session/prompt only after the turn a mid-turn background notification starts', async () => {
+    const { c, sessionId } = await bootBackground();
+    scripted!.mockNextResponse(backgroundSleep('call_bg', 1));
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_fg',
+      name: 'Bash',
+      arguments: JSON.stringify({ command: 'sleep 3' }),
+    });
+    scripted!.mockNextText('read the finished task');
+
+    const result = (await c.send('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: 'run it' }],
+    })) as { stopReason: string };
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(scripted!.callCount()).toBe(3);
+    const response = c.received.findIndex((m) => (m.result as { stopReason?: string } | undefined)?.stopReason !== undefined);
+    const answer = c.received.findIndex(
+      (m) => (m.params as { update?: { content?: { text?: string } } } | undefined)?.update?.content?.text === 'read the finished task',
+    );
+    expect(answer).toBeGreaterThanOrEqual(0);
+    expect(answer).toBeLessThan(response);
+    const updates = workUpdates(c);
+    const task = updates.find((u) => u.sessionUpdate === 'async_task_spawned')?.asyncTaskId;
+    expect(typeof task).toBe('string');
+    expect(updates.map((u) => u.sessionUpdate === 'session_info_update' ? u._meta?.jaz?.stateUpdate : u.state)).toEqual([
+      { state: 'working', tasks: [] },
+      undefined,
+      'completed',
+      { state: 'idle', stopReason: 'end_turn', tasks: [task] },
+    ]);
+  }, 30_000);
+
+  it('reports the run a background task starts after the prompt with the task it took in', async () => {
+    const { c, sessionId } = await bootBackground();
+    scripted!.mockNextResponse(backgroundSleep('call_bg', 1));
+    scripted!.mockNextText('started in the background');
+    scripted!.mockNextText('the task finished');
+
+    const result = (await c.send('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: 'run it' }],
+    })) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+    expect(scripted!.callCount()).toBe(2);
+
+    await vi.waitFor(() => { expect(workUpdates(c)).toHaveLength(6); }, { timeout: 10_000 });
+    const updates = workUpdates(c);
+    const task = updates[1]?.asyncTaskId;
+    expect(updates.map((u) => u.sessionUpdate === 'session_info_update' ? u._meta?.jaz?.stateUpdate : u.state)).toEqual([
+      { state: 'working', tasks: [] },
+      undefined,
+      { state: 'idle', stopReason: 'end_turn', tasks: [] },
+      'completed',
+      { state: 'working', tasks: [task] },
+      { state: 'idle', stopReason: 'end_turn', tasks: [] },
+    ]);
+    expect(chunkTexts(c)).toContain('the task finished');
+  }, 30_000);
+
   it('cancels a prompt still queued behind an engine-internal turn', async () => {
     const c = await boot();
     const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {

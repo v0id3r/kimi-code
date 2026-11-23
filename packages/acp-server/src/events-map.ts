@@ -56,6 +56,11 @@ export function turnEndReasonToStopReason(
   }
 }
 
+export function asyncTaskState(status: string): string {
+  if (status === 'running' || status === 'completed') return status;
+  return status === 'killed' ? 'stopped' : 'failed';
+}
+
 const AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'provider.auth_error',
   'auth.login_required',

@@ -46,6 +46,26 @@ export const loopIdleEventSchema = z.object({
   time: z.number().optional(),
 });
 
+const taskInfoSchema = z.looseObject({
+  taskId: z.string(),
+  description: z.string(),
+  status: z.string(),
+  kind: z.string(),
+  detached: z.boolean().optional(),
+});
+
+export const taskStartedEventSchema = z.object({
+  type: z.literal('task.started'),
+  time: z.number().optional(),
+  info: taskInfoSchema,
+});
+
+export const taskTerminatedEventSchema = z.object({
+  type: z.literal('task.terminated'),
+  time: z.number().optional(),
+  info: taskInfoSchema,
+});
+
 export const assistantDeltaEventSchema = z.object({
   type: z.literal('assistant.delta'),
   time: z.number().optional(),
@@ -188,6 +208,8 @@ export interface AgentEventPayloads {
   'turn.ended': z.infer<typeof turnEndedEventSchema>;
   'loop.drained': z.infer<typeof loopDrainedEventSchema>;
   'loop.idle': z.infer<typeof loopIdleEventSchema>;
+  'task.started': z.infer<typeof taskStartedEventSchema>;
+  'task.terminated': z.infer<typeof taskTerminatedEventSchema>;
   'assistant.delta': z.infer<typeof assistantDeltaEventSchema>;
   'thinking.delta': z.infer<typeof thinkingDeltaEventSchema>;
   'tool.call.started': z.infer<typeof toolCallStartedEventSchema>;
@@ -214,6 +236,8 @@ export const agentEvents = {
   'turn.ended': { kind: 'stream', name: 'events', type: 'turn.ended', schema: turnEndedEventSchema },
   'loop.drained': { kind: 'stream', name: 'events', type: 'loop.drained', schema: loopDrainedEventSchema },
   'loop.idle': { kind: 'stream', name: 'events', type: 'loop.idle', schema: loopIdleEventSchema },
+  'task.started': { kind: 'stream', name: 'events', type: 'task.started', schema: taskStartedEventSchema },
+  'task.terminated': { kind: 'stream', name: 'events', type: 'task.terminated', schema: taskTerminatedEventSchema },
   'assistant.delta': { kind: 'stream', name: 'events', type: 'assistant.delta', schema: assistantDeltaEventSchema },
   'thinking.delta': { kind: 'stream', name: 'events', type: 'thinking.delta', schema: thinkingDeltaEventSchema },
   'tool.call.started': { kind: 'stream', name: 'events', type: 'tool.call.started', schema: toolCallStartedEventSchema },

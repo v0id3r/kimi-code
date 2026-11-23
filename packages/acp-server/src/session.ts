@@ -55,6 +55,7 @@ import {
 import {
   acpToolCallId,
   assistantDeltaToSessionUpdate,
+  asyncTaskState,
   availableCommandsUpdateNotification,
   configOptionUpdateNotification,
   currentModeUpdateNotification,
@@ -168,8 +169,11 @@ interface TurnDriver {
   launchPending: boolean;
   queued: boolean;
   awaitingResponseTurn: boolean;
-  early: Array<{ readonly turnId: number; readonly dispatch: () => void }>;
+  early: Array<() => void>;
 }
+
+type TurnEnded = AgentEventPayloads['turn.ended'];
+type TaskEvent = AgentEventPayloads['task.started'];
 
 export class AcpSession {
   private readonly klient: Klient;
@@ -183,6 +187,9 @@ export class AcpSession {
   private skills: readonly SkillSummary[] = [];
   private driver: TurnDriver | undefined;
   private readonly steerWaiters = new Set<SteerWaiter>();
+  private work: { readonly owned: boolean } | undefined;
+  private lastEnd: TurnEnded | undefined;
+  private readonly takenIn: string[] = [];
   private promptChain: Promise<unknown> = Promise.resolve();
   private readonly chainedPrompts = new Set<{ cancelled: boolean }>();
   private readonly pendingPromptAborts = new Set<{ aborted: boolean }>();
@@ -216,32 +223,32 @@ export class AcpSession {
     const events = this.agent.events;
     this.subscriptions.push(
       events.on('assistant.delta', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onAssistantDelta(event);
         });
       }),
       events.on('thinking.delta', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onThinkingDelta(event);
         });
       }),
       events.on('tool.call.started', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onToolCallStarted(event);
         });
       }),
       events.on('tool.call.delta', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onToolCallDelta(event);
         });
       }),
       events.on('tool.updated', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onToolUpdated(event);
         });
       }),
       events.on('tool.result', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onToolResult(event);
         });
       }),
@@ -249,9 +256,20 @@ export class AcpSession {
         this.onTurnStarted(event);
       }),
       events.on('turn.ended', (event) => {
-        this.dispatchTurnEvent(event.turnId, () => {
+        this.dispatchTurnEvent(() => {
           this.onTurnEnded(event);
         });
+      }),
+      events.on('loop.drained', () => {
+        this.dispatchTurnEvent(() => {
+          this.onLoopDrained();
+        });
+      }),
+      events.on('task.started', (event) => {
+        this.reportTask({ sessionUpdate: 'async_task_spawned', name: event.info.description, taskType: event.info.kind }, event.info);
+      }),
+      events.on('task.terminated', (event) => {
+        this.reportTask({ sessionUpdate: 'async_task_state_update', state: asyncTaskState(event.info.status) }, event.info);
       }),
       events.on('prompt.completed', (event) => {
         this.onPromptCompleted(event);
@@ -607,8 +625,8 @@ export class AcpSession {
               });
             });
           }
-          for (const early of driver.early.splice(0)) {
-            early.dispatch();
+          for (const dispatch of driver.early.splice(0)) {
+            dispatch();
           }
         },
         (error: unknown) => {
@@ -630,7 +648,7 @@ export class AcpSession {
     });
   }
 
-  private dispatchTurnEvent(turnId: number, dispatch: () => void): void {
+  private dispatchTurnEvent(dispatch: () => void): void {
     const driver = this.driver;
     if (
       driver !== undefined &&
@@ -638,7 +656,7 @@ export class AcpSession {
       driver.turnId === undefined &&
       driver.launchPending
     ) {
-      driver.early.push({ turnId, dispatch });
+      driver.early.push(dispatch);
       return;
     }
     dispatch();
@@ -800,19 +818,33 @@ export class AcpSession {
       sessionId: this.sessionId,
       update: {
         sessionUpdate: 'session_info_update',
-        _meta: { jaz: { stateUpdate: { state, stopReason } } },
+        _meta: { jaz: { stateUpdate: { state, stopReason, tasks: this.takenIn.splice(0) } } },
       },
     });
   }
 
+  private closeWork(end: TurnEnded): void {
+    if (this.work === undefined) return;
+    this.work = undefined;
+    const error = end.error as { readonly code: string; readonly message?: string } | undefined;
+    this.emitAgentWork(end.turnId, 'idle', end.reason === 'failed' ? 'error' : turnEndReasonToStopReason(end.reason, error));
+    if (end.stopReason !== 'prompt_only') void this.emitUsageUpdate(end.turnId);
+  }
+
+  private reportTask(update: Record<string, unknown>, info: TaskEvent['info']): void {
+    if (info.detached !== true) return;
+    this.emit({ sessionId: this.sessionId, update: { ...update, asyncTaskId: info.taskId } } as unknown as SessionNotification);
+  }
+
   private onTurnStarted(event: AgentEventPayloads['turn.started']): void {
+    const ended = this.lastEnd;
+    this.lastEnd = undefined;
     const driver = this.driver;
-    if (driver === undefined || driver.settled || driver.turnId !== undefined) {
-      this.emitAgentWork(event.turnId, 'working');
-      return;
-    }
-    if (driver.queued && driver.promptId !== undefined && event.promptId === driver.promptId) {
+    const pending = driver !== undefined && !driver.settled && driver.turnId === undefined;
+    const queuedTurn = driver?.queued === true && driver.promptId !== undefined && event.promptId === driver.promptId;
+    if (pending && (driver.awaitingResponseTurn || queuedTurn)) {
       driver.queued = false;
+      driver.awaitingResponseTurn = false;
       driver.turnId = event.turnId;
       if (driver.cancelRequested === true) {
         void this.agent.cancel({ turnId: event.turnId }).catch((error: unknown) => {
@@ -822,11 +854,6 @@ export class AcpSession {
           });
         });
       }
-      return;
-    }
-    if (driver.awaitingResponseTurn) {
-      driver.awaitingResponseTurn = false;
-      driver.turnId = event.turnId;
     }
     for (const waiter of this.steerWaiters) {
       if (waiter.settled || waiter.turnId !== undefined) continue;
@@ -840,7 +867,12 @@ export class AcpSession {
         waiter.awaitingNextTurn = false;
       }
     }
-    if (!driver.launchPending && this.driverFor(event.turnId) === undefined) {
+    const owned = driver !== undefined && !driver.settled && (driver.launchPending || driver.turnId === event.turnId);
+    if (this.work !== undefined && this.work.owned !== owned && ended !== undefined) this.closeWork(ended);
+    const origin = event.origin as { readonly kind?: unknown; readonly taskId?: unknown } | undefined;
+    if (origin?.kind === 'task' && typeof origin.taskId === 'string') this.takenIn.push(origin.taskId);
+    if (this.work === undefined) {
+      this.work = { owned };
       this.emitAgentWork(event.turnId, 'working');
     }
   }
@@ -874,31 +906,26 @@ export class AcpSession {
     });
   }
 
-  private onTurnEnded(event: AgentEventPayloads['turn.ended']): void {
+  private onTurnEnded(event: TurnEnded): void {
+    this.lastEnd = event;
+    const completed = event.reason === 'completed';
+    const error = event.error as { readonly code: string; readonly message?: string } | undefined;
     for (const waiter of this.steerWaiters) {
       if (waiter.settled || waiter.turnId !== event.turnId) continue;
-      if (event.stopReason === 'prompt_only' && waiter.promptId !== undefined) {
+      if (completed) {
         waiter.turnId = undefined;
         waiter.awaitingNextTurn = true;
         continue;
       }
-      const waiterError = event.error as { readonly code: string; readonly message?: string } | undefined;
-      waiter.settle(turnEndReasonToStopReason(event.reason, waiterError));
+      waiter.settle(turnEndReasonToStopReason(event.reason, error));
     }
     const driver = this.driverFor(event.turnId);
-    if (driver === undefined) {
-      const error = event.error as { readonly code: string; readonly message?: string } | undefined;
-      const stopReason = event.reason === 'failed' ? 'error' : turnEndReasonToStopReason(event.reason, error);
-      this.emitAgentWork(event.turnId, 'idle', stopReason);
-      if (event.stopReason !== 'prompt_only') void this.emitUsageUpdate(event.turnId);
-      return;
-    }
-    if (event.stopReason === 'prompt_only') {
+    if (driver === undefined) return;
+    if (completed && driver.cancelRequested !== true) {
       driver.turnId = undefined;
       driver.awaitingResponseTurn = true;
       return;
     }
-    const error = event.error as { readonly code: string; readonly message?: string } | undefined;
     this.settleDriver(driver, () => {
       if (event.reason === 'failed' && isAuthError(error)) {
         driver.reject(RequestError.authRequired(undefined, error?.message));
@@ -906,7 +933,22 @@ export class AcpSession {
       }
       driver.resolve({ stopReason: turnEndReasonToStopReason(event.reason, error) });
     });
-    void this.emitUsageUpdate(event.turnId);
+  }
+
+  private onLoopDrained(): void {
+    const end = this.lastEnd;
+    if (end === undefined) return;
+    this.lastEnd = undefined;
+    this.closeWork(end);
+    const stopReason = turnEndReasonToStopReason(end.reason, end.error as { readonly code: string } | undefined);
+    for (const waiter of this.steerWaiters) {
+      if (waiter.awaitingNextTurn) waiter.settle(stopReason);
+    }
+    const driver = this.driver;
+    if (driver === undefined || driver.settled || !driver.awaitingResponseTurn) return;
+    this.settleDriver(driver, () => {
+      driver.resolve({ stopReason: driver.cancelRequested === true ? 'cancelled' : stopReason });
+    });
   }
 
   private async emitUsageUpdate(turnId?: number): Promise<void> {
@@ -1022,12 +1064,7 @@ export class AcpSession {
       });
       return;
     }
-    if (driver.awaitingResponseTurn) {
-      this.settleDriver(driver, () => {
-        driver.resolve({ stopReason: 'cancelled' });
-      });
-      return;
-    }
+    if (driver.awaitingResponseTurn) return;
     if (driver.queued) {
       this.settleDriver(driver, () => {
         driver.resolve({ stopReason: 'cancelled' });
