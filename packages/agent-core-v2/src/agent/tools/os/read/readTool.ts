@@ -6,6 +6,7 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { isTaskOutputFilePath } from '#/agent/task/persist';
 import { type HostFileHead, IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { isHostFsNotDirectory, isHostFsNotFound } from '#/os/interface/hostFsErrors';
 import { acquireOrWhenReady, IAgentEnvironmentService, pinnedGeneration } from '#/agent/environmentBinding/agentEnvironment';
 import { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
@@ -195,6 +196,7 @@ async function* decodedLines(lines: readonly string[]): AsyncGenerator<string> {
 }
 
 const READ_MEDIA_FILE_TOOL_NAME = 'ReadMediaFile';
+const localFs = new HostFileSystem();
 
 function notReadableFileOutput(path: string): string {
   return `"${path}" is not readable as UTF-8 text. Only text files can be read.`;
@@ -256,7 +258,7 @@ export class ReadTool implements IReadTool {
     if (isDaemonFileUrl(args.path)) return this.attachmentExecution(args);
     const planTarget = await this.planService?.resolveFile(args.path, 'read');
     if (planTarget !== undefined) return this.localArtifactExecution(args, planTarget, true);
-    const artifactTarget = this.localOutputTarget(args.path);
+    const artifactTarget = await this.localOutputTarget(args.path);
     if (artifactTarget !== undefined) return this.localArtifactExecution(args, artifactTarget, false);
     const resolutionLease = await acquireOrWhenReady(this.environment, ['fs']);
     try {
@@ -304,7 +306,7 @@ export class ReadTool implements IReadTool {
     }
   }
 
-  private localOutputTarget(path: string): PlanFileTarget | undefined {
+  private async localOutputTarget(path: string): Promise<PlanFileTarget | undefined> {
     if (this.hostFs === undefined || this.hostEnvironment === undefined || path.includes('\0')) return undefined;
     const environmentPath = this.hostEnvironment.pathClass === 'win32' ? win32Path : posixPath;
     if (!environmentPath.isAbsolute(path)) return undefined;
@@ -313,8 +315,19 @@ export class ReadTool implements IReadTool {
       isTaskOutputFilePath(normalized, environmentPath.join(this.session.sessionDir, 'agents', this.agent.agentId), environmentPath) ||
       (this.agent.agentId === 'main' && isTaskOutputFilePath(normalized, this.session.sessionDir, environmentPath))
     );
-    if (!taskOutput && !this.resultTruncation.isSpillFilePath(normalized)) return undefined;
-    return { fs: this.hostFs, path: normalized, environmentPath: { ...environmentPath, separator: environmentPath.sep, delimiter: environmentPath.delimiter }, pathClass: this.hostEnvironment.pathClass };
+    let target = normalized;
+    let fs = this.hostFs;
+    if (!taskOutput) {
+      if (!this.resultTruncation.isSpillFilePath(normalized) || this.session === undefined) return undefined;
+      const sessionDir = this.session.sessionDir;
+      const relative = environmentPath.relative(sessionDir, normalized);
+      if (relative === '..' || relative.startsWith(`..${environmentPath.sep}`) || environmentPath.isAbsolute(relative)) return undefined;
+      const resolved = await Promise.all([localFs.realpath(sessionDir), localFs.realpath(normalized)]).catch(() => undefined);
+      if (resolved === undefined || resolved[1] !== environmentPath.join(resolved[0], relative)) return undefined;
+      target = resolved[1];
+      fs = localFs;
+    }
+    return { fs, path: target, environmentPath: { ...environmentPath, separator: environmentPath.sep, delimiter: environmentPath.delimiter }, pathClass: this.hostEnvironment.pathClass };
   }
 
   private localArtifactExecution(args: ReadInput, target: PlanFileTarget, planFile: boolean): ToolExecution {
