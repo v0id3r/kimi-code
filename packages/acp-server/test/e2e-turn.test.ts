@@ -915,9 +915,9 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     return { c, sessionId: created.sessionId };
   }
 
-  it('answers session/prompt only after the turn a mid-turn background notification starts', async () => {
+  it('answers session/prompt only after the turns mid-turn background notifications start', async () => {
     const { c, sessionId } = await bootBackground();
-    scripted!.mockNextResponse(backgroundSleep('call_bg', 1));
+    scripted!.mockNextResponse(backgroundSleep('call_a', 1), backgroundSleep('call_b', 1));
     scripted!.mockNextResponse({
       type: 'function',
       id: 'call_fg',
@@ -940,14 +940,14 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     expect(answer).toBeGreaterThanOrEqual(0);
     expect(answer).toBeLessThan(response);
     const updates = workUpdates(c);
-    const task = updates.find((u) => u.sessionUpdate === 'async_task_spawned')?.asyncTaskId;
-    expect(typeof task).toBe('string');
-    expect(updates.map((u) => u.sessionUpdate === 'session_info_update' ? u._meta?.jaz?.stateUpdate : u.state)).toEqual([
+    const tasks = updates.filter((u) => u.sessionUpdate === 'async_task_spawned').map((u) => u.asyncTaskId);
+    expect(tasks).toHaveLength(2);
+    const states = updates.flatMap((u) => u._meta?.jaz?.stateUpdate ?? []);
+    expect(states).toEqual([
       { state: 'working', tasks: [] },
-      undefined,
-      'completed',
-      { state: 'idle', stopReason: 'end_turn', tasks: [task] },
+      { state: 'idle', stopReason: 'end_turn', tasks: expect.any(Array) },
     ]);
+    expect(states[1]?.tasks?.toSorted()).toEqual(tasks.toSorted());
   }, 30_000);
 
   it('reports the run a background task starts after the prompt with the task it took in', async () => {
