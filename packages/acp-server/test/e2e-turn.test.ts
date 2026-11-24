@@ -886,6 +886,7 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     sessionUpdate?: string;
     asyncTaskId?: string;
     state?: string;
+    canStop?: boolean;
     _meta?: { jaz?: { stateUpdate?: { state?: string; tasks?: string[] } } };
   };
 
@@ -974,6 +975,22 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       { state: 'idle', stopReason: 'end_turn', tasks: [] },
     ]);
     expect(chunkTexts(c)).toContain('the task finished');
+  }, 30_000);
+
+  it('stops a background task on _session/async_task/stop', async () => {
+    const { c, sessionId } = await bootBackground();
+    scripted!.mockNextResponse(backgroundSleep('call_bg', 30));
+    scripted!.mockNextText('started in the background');
+    await c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'run it' }] });
+
+    const spawned = workUpdates(c).find((u) => u.sessionUpdate === 'async_task_spawned');
+    expect(spawned?.canStop).toBe(true);
+    const stop = { sessionId, asyncTaskId: spawned!.asyncTaskId };
+    expect(await c.send('_session/async_task/stop', stop)).toEqual({ stopped: true });
+    await vi.waitFor(() => {
+      expect(workUpdates(c).find((u) => u.sessionUpdate === 'async_task_state_update')?.state).toBe('stopped');
+    }, { timeout: 10_000 });
+    expect(await c.send('_session/async_task/stop', stop)).toEqual({ stopped: false });
   }, 30_000);
 
   it('cancels a prompt still queued behind an engine-internal turn', async () => {

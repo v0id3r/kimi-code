@@ -328,6 +328,11 @@ export class AcpServer {
     return acpSession.steer(params.prompt, params.waitForCompletion === true);
   }
 
+  async stopAsyncTask(params: AsyncTaskStopRequest): Promise<{ stopped: boolean }> {
+    const acpSession = this.sessions.get(params.sessionId);
+    return { stopped: acpSession !== undefined && (await acpSession.stopTask(params.asyncTaskId)) };
+  }
+
   async cancel(params: CancelNotification): Promise<void> {
     const acpSession = this.sessions.get(params.sessionId);
     if (!acpSession) {
@@ -528,6 +533,24 @@ function parseSteeringParams(params: unknown): SteeringRequest {
   return { sessionId, prompt: prompt as ContentBlock[], waitForCompletion: waitForCompletion === true };
 }
 
+const ASYNC_TASK_STOP_METHOD = '_session/async_task/stop';
+
+export interface AsyncTaskStopRequest {
+  readonly sessionId: string;
+  readonly asyncTaskId: string;
+}
+
+function parseAsyncTaskStopParams(params: unknown): AsyncTaskStopRequest {
+  const { sessionId, asyncTaskId } = (params ?? {}) as Record<string, unknown>;
+  if (typeof sessionId !== 'string' || typeof asyncTaskId !== 'string') {
+    throw RequestError.invalidParams(
+      params,
+      '_session/async_task/stop expects { sessionId: string, asyncTaskId: string }',
+    );
+  }
+  return { sessionId, asyncTaskId };
+}
+
 export interface SetSessionModelParams {
   readonly sessionId: string;
   readonly modelId: string;
@@ -575,6 +598,9 @@ export function createAcpAgentApp(getServer: () => AcpServer | Promise<AcpServer
     )
     .onRequest(SESSION_STEERING_METHOD, parseSteeringParams, async (ctx) =>
       (await getServer()).steering(ctx.params, ctx.signal),
+    )
+    .onRequest(ASYNC_TASK_STOP_METHOD, parseAsyncTaskStopParams, async (ctx) =>
+      (await getServer()).stopAsyncTask(ctx.params),
     );
 }
 

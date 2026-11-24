@@ -52,6 +52,7 @@ const taskInfoSchema = z.looseObject({
   status: z.string(),
   kind: z.string(),
   detached: z.boolean().optional(),
+  swarmIndex: z.number().optional(),
 });
 
 export const taskStartedEventSchema = z.object({

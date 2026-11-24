@@ -190,6 +190,7 @@ export class AcpSession {
   private work: { readonly owned: boolean } | undefined;
   private lastEnd: TurnEnded | undefined;
   private readonly takenIn: string[] = [];
+  private readonly stoppable = new Set<string>();
   private promptChain: Promise<unknown> = Promise.resolve();
   private readonly chainedPrompts = new Set<{ cancelled: boolean }>();
   private readonly pendingPromptAborts = new Set<{ aborted: boolean }>();
@@ -265,11 +266,14 @@ export class AcpSession {
           this.onLoopDrained();
         });
       }),
-      events.on('task.started', (event) => {
-        this.reportTask({ sessionUpdate: 'async_task_spawned', name: event.info.description, taskType: event.info.kind }, event.info);
+      events.on('task.started', ({ info }) => {
+        const canStop = info.swarmIndex === undefined;
+        if (canStop) this.stoppable.add(info.taskId);
+        this.reportTask({ sessionUpdate: 'async_task_spawned', name: info.description, taskType: info.kind, canStop }, info);
       }),
-      events.on('task.terminated', (event) => {
-        this.reportTask({ sessionUpdate: 'async_task_state_update', state: asyncTaskState(event.info.status) }, event.info);
+      events.on('task.terminated', ({ info }) => {
+        this.stoppable.delete(info.taskId);
+        this.reportTask({ sessionUpdate: 'async_task_state_update', state: asyncTaskState(info.status) }, info);
       }),
       events.on('prompt.completed', (event) => {
         this.onPromptCompleted(event);
@@ -458,6 +462,12 @@ export class AcpSession {
     });
     this.promptChain = run.catch(() => undefined);
     return run;
+  }
+
+  async stopTask(taskId: string): Promise<boolean> {
+    if (!this.stoppable.has(taskId)) return false;
+    await this.agent.stopTask({ taskId });
+    return true;
   }
 
   async steer(blocks: readonly ContentBlock[], waitForCompletion: boolean): Promise<SteeringResponse> {
