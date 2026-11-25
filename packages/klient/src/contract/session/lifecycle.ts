@@ -11,11 +11,13 @@ export const createSessionOptionsSchema = z.object({
   additionalDirs: z.array(z.string()).optional(),
   environmentId: z.string().optional(),
   mcpServers: z.record(z.string(), mcpServerConfigSchema).optional(),
+  systemPromptAppend: z.string().optional(),
 });
 
 export const resumeSessionOptionsSchema = z.object({
   additionalDirs: z.array(z.string()).optional(),
   mcpServers: z.record(z.string(), mcpServerConfigSchema).optional(),
+  systemPromptAppend: z.string().optional(),
 });
 
 export const forkSessionOptionsSchema = z.object({

@@ -56,6 +56,11 @@ export function turnEndReasonToStopReason(
   }
 }
 
+export function asyncTaskState(status: string): string {
+  if (status === 'running' || status === 'completed') return status;
+  return status === 'killed' ? 'stopped' : 'failed';
+}
+
 const AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'provider.auth_error',
   'auth.login_required',
@@ -275,6 +280,7 @@ export function toolResultToSessionUpdate(
   sessionId: string,
   event: ToolResultEvent,
   locations?: ToolCallLocation[],
+  diff?: ToolCallContent,
 ): SessionNotification {
   return {
     sessionId,
@@ -282,7 +288,7 @@ export function toolResultToSessionUpdate(
       sessionUpdate: 'tool_call_update',
       toolCallId: acpToolCallId(event.turnId, event.toolCallId),
       status: event.isError ? 'failed' : 'completed',
-      content: toolResultToAcpContent(event),
+      content: [...(diff === undefined ? [] : [diff]), ...toolResultToAcpContent(event)],
       rawOutput: event.output,
       locations,
     },
@@ -372,10 +378,24 @@ export function configOptionUpdateNotification(
   };
 }
 
+export interface AcpUsageTokens {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheCreationInputTokens: number;
+}
+
+export interface AcpUsageReport {
+  readonly usageId: string;
+  readonly usage: AcpUsageTokens;
+}
+
 export function usageUpdateNotification(
   sessionId: string,
   used: number,
   size: number,
+  report?: AcpUsageReport,
 ): SessionNotification {
   return {
     sessionId,
@@ -383,6 +403,7 @@ export function usageUpdateNotification(
       sessionUpdate: 'usage_update',
       used,
       size,
+      ...(report === undefined ? {} : { _meta: { ...report } }),
     },
   };
 }

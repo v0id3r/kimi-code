@@ -7,6 +7,7 @@ import {
   type AuthenticateResponse,
   type CancelNotification,
   type ClientCapabilities,
+  type ContentBlock,
   type CloseSessionRequest,
   type CloseSessionResponse,
   type DeleteSessionRequest,
@@ -52,7 +53,7 @@ import { buildTerminalAuthMethod, TERMINAL_AUTH_METHOD } from './auth-methods';
 import { acpMcpServersToConfigRecord } from './convert';
 import { log } from './log';
 import { isAcpModeId } from './modes';
-import { AcpSession } from './session';
+import { AcpSession, type SteeringResponse } from './session';
 import { negotiateVersion } from './version';
 
 const SESSION_NOT_FOUND_CODE = 40404;
@@ -163,6 +164,10 @@ export class AcpServer {
           : TERMINAL_AUTH_METHOD,
       ],
       ...(this.agentInfo ? { agentInfo: this.agentInfo } : {}),
+      _meta: {
+        [SYSTEM_PROMPT_APPEND_META]: true,
+        steering: { supported: true, waitForCompletion: true },
+      },
     };
   }
 
@@ -172,6 +177,7 @@ export class AcpServer {
       workDir: params.cwd,
       additionalDirs: params.additionalDirectories,
       mcpServers: acpMcpServersToConfigRecord(params.mcpServers),
+      systemPromptAppend: systemPromptAppend(params._meta),
       environmentId: 'local',
     });
     return { sessionId: meta.id, ...(await this.activateSession(meta.id)) };
@@ -197,7 +203,9 @@ export class AcpServer {
       }
       throw error;
     }
-    const restored = await this.klient.session(forkedId).restore();
+    const restored = await this.klient
+      .session(forkedId)
+      .restore({ systemPromptAppend: systemPromptAppend(params._meta) });
     if (!restored) {
       throw RequestError.invalidParams(
         { sessionId: forkedId },
@@ -210,10 +218,10 @@ export class AcpServer {
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     await this.ensureAuthed();
     this.warnIgnoredAdditionalDirs('session/load', params.additionalDirectories);
-    const acpSession = await this.resumeAcpSession(
-      params.sessionId,
-      acpMcpServersToConfigRecord(params.mcpServers),
-    );
+    const acpSession = await this.resumeAcpSession(params.sessionId, {
+      mcpServers: acpMcpServersToConfigRecord(params.mcpServers),
+      systemPromptAppend: systemPromptAppend(params._meta),
+    });
     await acpSession.replayHistory();
     this.scheduleAvailableCommandsUpdate(acpSession);
     return { configOptions: await acpSession.configOptions(), modes: acpSession.modeState() };
@@ -222,10 +230,10 @@ export class AcpServer {
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
     await this.ensureAuthed();
     this.warnIgnoredAdditionalDirs('session/resume', params.additionalDirectories);
-    const acpSession = await this.resumeAcpSession(
-      params.sessionId,
-      acpMcpServersToConfigRecord(params.mcpServers),
-    );
+    const acpSession = await this.resumeAcpSession(params.sessionId, {
+      mcpServers: acpMcpServersToConfigRecord(params.mcpServers),
+      systemPromptAppend: systemPromptAppend(params._meta),
+    });
     this.scheduleAvailableCommandsUpdate(acpSession);
     return { configOptions: await acpSession.configOptions(), modes: acpSession.modeState() };
   }
@@ -307,6 +315,22 @@ export class AcpServer {
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
+  }
+
+  async steering(params: SteeringRequest, signal?: AbortSignal): Promise<SteeringResponse> {
+    const acpSession = this.sessions.get(params.sessionId);
+    if (!acpSession) {
+      throw RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+    }
+    if (signal !== undefined && signal.aborted) {
+      acpSession.cancel();
+    }
+    return acpSession.steer(params.prompt, params.waitForCompletion === true);
+  }
+
+  async stopAsyncTask(params: AsyncTaskStopRequest): Promise<{ stopped: boolean }> {
+    const acpSession = this.sessions.get(params.sessionId);
+    return { stopped: acpSession !== undefined && (await acpSession.stopTask(params.asyncTaskId)) };
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -397,9 +421,9 @@ export class AcpServer {
 
   private async resumeAcpSession(
     sessionId: string,
-    mcpServers?: SessionRestoreOptions['mcpServers'],
+    opts: SessionRestoreOptions,
   ): Promise<AcpSession> {
-    const restored = await this.klient.session(sessionId).restore({ mcpServers });
+    const restored = await this.klient.session(sessionId).restore(opts);
     if (!restored) {
       throw RequestError.invalidParams({ sessionId }, `Unknown sessionId: ${sessionId}`);
     }
@@ -483,6 +507,50 @@ export class AcpServer {
 
 const SET_SESSION_MODEL_METHOD = 'session/set_model';
 
+const SESSION_STEERING_METHOD = '_session/steering';
+
+const SYSTEM_PROMPT_APPEND_META = 'jaz.dev/systemPromptAppend';
+
+function systemPromptAppend(meta: Record<string, unknown> | null | undefined): string | undefined {
+  const value = meta?.['systemPrompt'];
+  return typeof value === 'string' ? value.trim() || undefined : undefined;
+}
+
+export interface SteeringRequest {
+  readonly sessionId: string;
+  readonly prompt: readonly ContentBlock[];
+  readonly waitForCompletion?: boolean;
+}
+
+function parseSteeringParams(params: unknown): SteeringRequest {
+  const { sessionId, prompt, waitForCompletion } = (params ?? {}) as Record<string, unknown>;
+  if (typeof sessionId !== 'string' || !Array.isArray(prompt)) {
+    throw RequestError.invalidParams(
+      params,
+      '_session/steering expects { sessionId: string, prompt: ContentBlock[] }',
+    );
+  }
+  return { sessionId, prompt: prompt as ContentBlock[], waitForCompletion: waitForCompletion === true };
+}
+
+const ASYNC_TASK_STOP_METHOD = '_session/async_task/stop';
+
+export interface AsyncTaskStopRequest {
+  readonly sessionId: string;
+  readonly asyncTaskId: string;
+}
+
+function parseAsyncTaskStopParams(params: unknown): AsyncTaskStopRequest {
+  const { sessionId, asyncTaskId } = (params ?? {}) as Record<string, unknown>;
+  if (typeof sessionId !== 'string' || typeof asyncTaskId !== 'string') {
+    throw RequestError.invalidParams(
+      params,
+      '_session/async_task/stop expects { sessionId: string, asyncTaskId: string }',
+    );
+  }
+  return { sessionId, asyncTaskId };
+}
+
 export interface SetSessionModelParams {
   readonly sessionId: string;
   readonly modelId: string;
@@ -527,6 +595,12 @@ export function createAcpAgentApp(getServer: () => AcpServer | Promise<AcpServer
     )
     .onRequest(SET_SESSION_MODEL_METHOD, parseSetSessionModelParams, async (ctx) =>
       (await getServer()).setSessionModel(ctx.params),
+    )
+    .onRequest(SESSION_STEERING_METHOD, parseSteeringParams, async (ctx) =>
+      (await getServer()).steering(ctx.params, ctx.signal),
+    )
+    .onRequest(ASYNC_TASK_STOP_METHOD, parseAsyncTaskStopParams, async (ctx) =>
+      (await getServer()).stopAsyncTask(ctx.params),
     );
 }
 

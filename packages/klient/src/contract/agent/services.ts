@@ -7,6 +7,7 @@ import {
   agentCommandInfoSchema,
   agentTaskInfoSchema,
   permissionModeSchema,
+  loopCancelTargetSchema,
   planDataSchema,
   promptLaunchResultSchema,
   promptPayloadSchema,
@@ -39,6 +40,7 @@ export const agentLoopContract = {
     output: steerResultSchema,
   },
   cancelFromUser: { input: z.tuple([z.number().optional()]), output: noResult },
+  cancel: { input: z.tuple([loopCancelTargetSchema]), output: noResult },
 } satisfies ServiceContract;
 
 export const agentPermissionModeContract = {

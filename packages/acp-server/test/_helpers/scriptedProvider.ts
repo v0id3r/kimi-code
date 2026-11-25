@@ -6,6 +6,7 @@ import {
 } from '@moonshot-ai/agent-core-v2';
 import type { Message, StreamedMessagePart } from '@moonshot-ai/core/llm/message';
 import type { FinishReason } from '@moonshot-ai/core/llm/response';
+import type { TokenUsage } from '@moonshot-ai/core/llm/usage';
 import {
   createMockProvider,
   withMockProvider,
@@ -15,6 +16,8 @@ import {
 export interface ScriptedProvider {
   readonly seed: readonly [typeof IProtocolAdapterRegistry, IProtocolAdapterRegistryType];
   mockNextText(text: string): void;
+  mockNextTextWithUsage(text: string, usage: TokenUsage): void;
+  mockNextGatedText(text: string, gate: Promise<void>): void;
   mockNextResponse(...parts: StreamedMessagePart[]): void;
   mockNextProviderResponse(response: {
     readonly parts?: readonly StreamedMessagePart[];
@@ -23,13 +26,26 @@ export interface ScriptedProvider {
   }): void;
   callCount(): number;
   callHistory(): ReadonlyArray<readonly Message[]>;
+  systemPrompts(): readonly string[];
+}
+
+function raceAbort(gate: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+  return Promise.race([
+    gate,
+    new Promise<void>((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason instanceof Error ? signal.reason : new Error('aborted')), { once: true });
+    }),
+  ]);
 }
 
 export function createScriptedProvider(): ScriptedProvider {
-  const queue: MockProviderResponse[] = [];
+  const queue: Array<MockProviderResponse & { readonly gate?: Promise<void> }> = [];
   const calls: Array<readonly Message[]> = [];
-  const provider = createMockProvider((request, signal) => {
+  const systemPrompts: string[] = [];
+  const provider = createMockProvider(async (request, signal) => {
     signal.throwIfAborted();
+    systemPrompts.push(request.profile?.systemPrompt ?? '');
     const response = queue.shift();
     if (response === undefined) {
       throw new Error(
@@ -38,6 +54,7 @@ export function createScriptedProvider(): ScriptedProvider {
       );
     }
     calls.push(structuredClone(request.content.messages));
+    if (response.gate !== undefined) await raceAbort(response.gate, signal);
     return {
       ...response,
       id: response.id ?? `scripted-${String(calls.length)}`,
@@ -64,6 +81,12 @@ export function createScriptedProvider(): ScriptedProvider {
     mockNextText: (text) => {
       queue.push({ parts: [{ type: 'text', text }] });
     },
+    mockNextTextWithUsage: (text, usage) => {
+      queue.push({ parts: [{ type: 'text', text }], usage });
+    },
+    mockNextGatedText: (text, gate) => {
+      queue.push({ parts: [{ type: 'text', text }], gate });
+    },
     mockNextResponse: (...parts) => {
       queue.push({ parts: structuredClone(parts) });
     },
@@ -72,5 +95,6 @@ export function createScriptedProvider(): ScriptedProvider {
     },
     callCount: () => calls.length,
     callHistory: () => calls,
+    systemPrompts: () => systemPrompts,
   };
 }

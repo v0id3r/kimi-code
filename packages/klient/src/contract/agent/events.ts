@@ -30,8 +30,30 @@ export const turnEndedEventSchema = z.object({
   interruptReason: z
     .enum(['user_cancelled', 'aborted', 'max_steps', 'error', 'filtered', 'blocked'])
     .optional(),
+  stopReason: z.string().optional(),
   requestId: z.string().optional(),
   continuation: z.enum(['turn', 'background', 'none']).optional(),
+});
+
+const taskInfoSchema = z.looseObject({
+  taskId: z.string(),
+  description: z.string(),
+  status: z.string(),
+  kind: z.string(),
+  detached: z.boolean().optional(),
+  swarmIndex: z.number().optional(),
+});
+
+export const taskStartedEventSchema = z.object({
+  type: z.literal('task.started'),
+  time: z.number().optional(),
+  info: taskInfoSchema,
+});
+
+export const taskTerminatedEventSchema = z.object({
+  type: z.literal('task.terminated'),
+  time: z.number().optional(),
+  info: taskInfoSchema,
 });
 
 export const assistantDeltaEventSchema = z.object({
@@ -174,6 +196,8 @@ export const agentStatusUpdatedEventSchema = z.looseObject({
 export interface AgentEventPayloads {
   'turn.started': z.infer<typeof turnStartedEventSchema>;
   'turn.ended': z.infer<typeof turnEndedEventSchema>;
+  'task.started': z.infer<typeof taskStartedEventSchema>;
+  'task.terminated': z.infer<typeof taskTerminatedEventSchema>;
   'assistant.delta': z.infer<typeof assistantDeltaEventSchema>;
   'thinking.delta': z.infer<typeof thinkingDeltaEventSchema>;
   'tool.call.started': z.infer<typeof toolCallStartedEventSchema>;
@@ -198,6 +222,8 @@ export type AgentEventName = keyof AgentEventPayloads;
 export const agentEvents = {
   'turn.started': { kind: 'stream', name: 'events', type: 'turn.started', schema: turnStartedEventSchema },
   'turn.ended': { kind: 'stream', name: 'events', type: 'turn.ended', schema: turnEndedEventSchema },
+  'task.started': { kind: 'stream', name: 'events', type: 'task.started', schema: taskStartedEventSchema },
+  'task.terminated': { kind: 'stream', name: 'events', type: 'task.terminated', schema: taskTerminatedEventSchema },
   'assistant.delta': { kind: 'stream', name: 'events', type: 'assistant.delta', schema: assistantDeltaEventSchema },
   'thinking.delta': { kind: 'stream', name: 'events', type: 'thinking.delta', schema: thinkingDeltaEventSchema },
   'tool.call.started': { kind: 'stream', name: 'events', type: 'tool.call.started', schema: toolCallStartedEventSchema },

@@ -4,8 +4,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { getLiveSessionById, IAgentLifecycleService, IEventBus } from '@moonshot-ai/agent-core-v2';
+import { IAgentLoopService } from '@moonshot-ai/agent-core-v2/agent/loop/loop';
+import type { PromptOrigin } from '@moonshot-ai/agent-core-v2/agent/contextMemory/types';
 import { ToolUpdated } from '@moonshot-ai/agent-core-v2/agent/toolExecutor/toolExecutorEvents';
-import { afterEach, describe, expect, it } from 'vitest';
+import { createUserMessage } from '@moonshot-ai/core/llm/message';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { mapPromptLaunchError } from '../src/session';
 import { createTestClient, type TestClient } from './_helpers/acpClient';
@@ -74,8 +77,11 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     });
 
     const chunk = await c.waitForSessionUpdate('agent_message_chunk', 10_000);
-    const update = (chunk.params as { update?: { content?: { text?: string } } }).update;
+    const update = (
+      chunk.params as { update?: { content?: { text?: string }; _meta?: { turnId?: number } } }
+    ).update;
     expect(update?.content?.text).toContain('hello from the scripted model');
+    expect(typeof update?._meta?.turnId).toBe('number');
 
     const result = (await promptPromise) as { stopReason: string };
     expect(result.stopReason).toBe('end_turn');
@@ -83,11 +89,123 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
 
     const usage = await c.waitForSessionUpdate('usage_update', 10_000);
     const usageUpdate = (
-      usage.params as { update?: { used?: number; size?: number; cost?: unknown } }
+      usage.params as {
+        update?: {
+          used?: number;
+          size?: number;
+          cost?: unknown;
+          _meta?: { usage?: Record<string, number> };
+        };
+      }
     ).update;
     expect(usageUpdate?.size).toBe(8192);
     expect(usageUpdate?.used).toBeGreaterThan(0);
     expect(usageUpdate?.cost).toBeUndefined();
+    expect(usageUpdate?._meta?.usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 1,
+      totalTokens: 1,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    });
+  }, 30_000);
+
+  it('maps the engine token usage onto usage_update _meta.usage (OpenAI/Codex fields)', async () => {
+    const c = await boot();
+    scripted!.mockNextTextWithUsage('token report', {
+      inputOther: 18,
+      output: 5,
+      inputCacheRead: 30,
+      inputCacheCreation: 0,
+    });
+
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    const prompt = await c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'report usage' }],
+    });
+    expect((prompt as { stopReason: string }).stopReason).toBe('end_turn');
+
+    const usage = await c.waitForSessionUpdate('usage_update', 10_000);
+    const meta = (
+      usage.params as { update?: { _meta?: { usageId?: string; usage?: Record<string, number> } } }
+    ).update?._meta;
+    expect(typeof meta?.usageId).toBe('string');
+    expect(meta?.usage).toEqual({
+      inputTokens: 48,
+      outputTokens: 5,
+      totalTokens: 53,
+      cacheReadInputTokens: 30,
+      cacheCreationInputTokens: 0,
+    });
+  }, 30_000);
+
+  type UsageMeta = { usageId?: string; usage?: Record<string, number> };
+  type MockUsage = Parameters<ScriptedProvider['mockNextTextWithUsage']>[1];
+  const FIRST_USAGE = { inputOther: 11, output: 5, inputCacheRead: 30, inputCacheCreation: 7 };
+  const SECOND_USAGE = { inputOther: 2, output: 3, inputCacheRead: 40, inputCacheCreation: 0 };
+
+  function usageReports(c: TestClient): (UsageMeta | undefined)[] {
+    return c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: { sessionUpdate?: string; _meta?: UsageMeta } }).update)
+      .filter((u) => u?.sessionUpdate === 'usage_update')
+      .map((u) => u?._meta);
+  }
+
+  async function promptWithUsage(c: TestClient, sessionId: string, usage: MockUsage) {
+    const before = usageReports(c).length;
+    scripted!.mockNextTextWithUsage('turn', usage);
+    await c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'turn' }] });
+    await vi.waitFor(
+      () => {
+        expect(usageReports(c).length).toBe(before + 1);
+      },
+      { timeout: 10_000 },
+    );
+    return usageReports(c).at(-1);
+  }
+
+  it('reports each turn its own tokens under a distinct usageId', async () => {
+    const c = await boot();
+    const { sessionId } = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = await promptWithUsage(c, sessionId, FIRST_USAGE);
+    const second = await promptWithUsage(c, sessionId, SECOND_USAGE);
+    expect(first?.usage).toMatchObject({ inputTokens: 48, outputTokens: 5 });
+    expect(second?.usage).toEqual({
+      inputTokens: 42,
+      outputTokens: 3,
+      totalTokens: 45,
+      cacheReadInputTokens: 40,
+      cacheCreationInputTokens: 0,
+    });
+    expect(second?.usageId).not.toBe(first?.usageId);
+  }, 30_000);
+
+  it('does not re-report restored session usage after a host restart', async () => {
+    const c = await boot();
+    const { sessionId } = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    await promptWithUsage(c, sessionId, FIRST_USAGE);
+    await c.close();
+
+    scripted = createScriptedProvider();
+    const restarted = await createTestClient({ homeDir: homeDir!, extraSeeds: [scripted.seed] });
+    client = restarted;
+    await restarted.send('initialize', { protocolVersion: 1, clientCapabilities: {} });
+    await restarted.send('session/load', { sessionId, cwd: homeDir, mcpServers: [] });
+
+    const report = await promptWithUsage(restarted, sessionId, SECOND_USAGE);
+    expect(report?.usage).toMatchObject({ inputTokens: 42, outputTokens: 3 });
   }, 30_000);
 
   it('runs a tool call and bridges the approval request to the client', async () => {
@@ -207,7 +325,7 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     expect(history).toContain('\\"Pick many\\":\\"X, Z\\"');
   }, 30_000);
 
-  it('rejects a second prompt while a turn is in flight', async () => {
+  it('queues a second prompt behind a turn parked at an approval and answers it after', async () => {
     const c = await boot();
     scripted!.mockNextResponse({
       type: 'function',
@@ -216,6 +334,7 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       arguments: '{"command":"printf busy_probe > approval-probe.txt"}',
     });
     scripted!.mockNextText('done');
+    scripted!.mockNextText('second answer');
 
     let answerPermission: ((response: unknown) => void) | undefined;
     const permissionSeen = new Promise<void>((seen) => {
@@ -238,17 +357,23 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     });
     await permissionSeen;
 
-    await expect(
-      c.send('session/prompt', {
-        sessionId: created.sessionId,
-        prompt: [{ type: 'text', text: 'again' }],
-      }),
-    ).rejects.toThrow(/another turn is already in progress/);
+    const secondPrompt = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'again' }],
+    });
+    const early = await Promise.race([
+      secondPrompt.then(() => 'settled' as const),
+      sleep(500).then(() => 'pending' as const),
+    ]);
+    expect(early).toBe('pending');
 
     answerPermission!({ outcome: { outcome: 'selected', optionId: 'approve_once' } });
     const result = (await firstPrompt) as { stopReason: string };
     expect(result.stopReason).toBe('end_turn');
-    expect(scripted!.callCount()).toBe(2);
+    const second = (await secondPrompt) as { stopReason: string };
+    expect(second.stopReason).toBe('end_turn');
+    expect(scripted!.callCount()).toBe(3);
+    expect(chunkTexts(c)).toContain('second answer');
   }, 30_000);
 
   it('settles as cancelled when cancel arrives while the launch is in flight', async () => {
@@ -540,6 +665,398 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
       updates.some((u) => u?.sessionUpdate === 'tool_call_update' && u?.title === 'Still working…'),
     ).toBe(true);
     expect(updates.some((u) => u?.title === 'raw-stdout-bytes')).toBe(false);
+  }, 30_000);
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  function deferred(): { gate: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { gate, release };
+  }
+
+  function injectNotification(c: TestClient, sessionId: string, promptId: string, text: string): void {
+    const session = getLiveSessionById(c.server.core.accessor, sessionId);
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).handleOf('main');
+    const loop = agentHandle?.accessor.get(IAgentLoopService);
+    expect(loop).toBeDefined();
+    loop!.notify(
+      createUserMessage(text, {
+        promptId,
+        origin: { kind: 'injection', variant: 'test_notification' } as PromptOrigin,
+      }),
+    );
+  }
+
+  function chunkTexts(c: TestClient): string[] {
+    return c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update)
+      .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+      .map((u) => u?.content?.text ?? '');
+  }
+
+  it('advertises native steering in initialize _meta', async () => {
+    homeDir = await mkdtemp(join(tmpdir(), 'acp-e2e-turn-'));
+    await writeFakeModelConfig(homeDir);
+    scripted = createScriptedProvider();
+    client = await createTestClient({ homeDir, extraSeeds: [scripted.seed] });
+    const init = (await client.send('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {},
+    })) as { _meta?: { steering?: { supported?: boolean; waitForCompletion?: boolean } } };
+    expect(init._meta?.steering?.supported).toBe(true);
+    expect(init._meta?.steering?.waitForCompletion).toBe(true);
+  }, 30_000);
+
+  it('injects a steering prompt into the running turn and settles with it', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const gate = deferred();
+    scripted!.mockNextGatedText('main answer', gate.gate);
+    const prompt1 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'main question' }],
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    scripted!.mockNextText('answer with the steer included');
+    const steerPromise = c.send('_session/steering', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'also consider this' }],
+      waitForCompletion: true,
+    });
+    await sleep(500);
+    gate.release();
+
+    const result1 = (await prompt1) as { stopReason: string };
+    expect(result1.stopReason).toBe('end_turn');
+    const steered = (await steerPromise) as { outcome: string; stopReason: string };
+    expect(steered.outcome).toBe('injected');
+    expect(steered.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+    expect(chunkTexts(c)).toContain('answer with the steer included');
+  }, 30_000);
+
+  it('starts a new turn for a steering prompt while idle', async () => {
+    const c = await boot();
+    scripted!.mockNextText('steer answer');
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const steered = (await c.send('_session/steering', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'question via steering' }],
+      waitForCompletion: true,
+    })) as { outcome: string; stopReason: string };
+    expect(steered.outcome).toBe('startedNewTurn');
+    expect(steered.stopReason).toBe('end_turn');
+    expect(chunkTexts(c)).toContain('steer answer');
+  }, 30_000);
+
+  it('settles an adopted steering call as cancelled on session/cancel', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    const second = deferred();
+    scripted!.mockNextGatedText('main answer', first.gate);
+    scripted!.mockNextGatedText('answer with the steer included', second.gate);
+    const prompt1 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'main question' }],
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    const steerPromise = c.send('_session/steering', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'also consider this' }],
+      waitForCompletion: true,
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+
+    c.notify('session/cancel', { sessionId: created.sessionId });
+    const steered = (await steerPromise) as { outcome: string; stopReason: string };
+    expect(steered.outcome).toBe('injected');
+    expect(steered.stopReason).toBe('cancelled');
+
+    first.release();
+    second.release();
+    await prompt1;
+  }, 30_000);
+
+  it('holds a prompt submitted during an engine-internal turn and answers it once the queue drains', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('notification turn work', first.gate);
+    injectNotification(c, created.sessionId, 'task:test:completed', '<notification>task done</notification>');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'user question' }],
+    });
+    const early = await Promise.race([
+      promptPromise.then(() => 'settled' as const),
+      sleep(500).then(() => 'pending' as const),
+    ]);
+    expect(early).toBe('pending');
+
+    scripted!.mockNextText('answer after the queue');
+    first.release();
+
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+
+    const texts = chunkTexts(c);
+    expect(texts.indexOf('notification turn work')).toBeGreaterThanOrEqual(0);
+    expect(texts.indexOf('answer after the queue')).toBeGreaterThan(texts.indexOf('notification turn work'));
+
+    const updates = c.sessionUpdates().map((m) => m.params as {
+      update?: {
+        sessionUpdate?: string;
+        content?: { text?: string };
+        _meta?: { turnId?: number; jaz?: { stateUpdate?: { state?: string } } };
+      };
+    });
+    const byText = (text: string) =>
+      updates.find((u) => u.update?.sessionUpdate === 'agent_message_chunk' && u.update?.content?.text === text);
+    const internalTurnId = byText('notification turn work')?.update?._meta?.turnId;
+    const answerTurnId = byText('answer after the queue')?.update?._meta?.turnId;
+    expect(typeof internalTurnId).toBe('number');
+    expect(typeof answerTurnId).toBe('number');
+    expect(answerTurnId).not.toBe(internalTurnId);
+    const closing = updates.find(
+      (u) => u.update?.sessionUpdate === 'usage_update' && u.update?._meta?.turnId === internalTurnId,
+    );
+    expect(closing).toBeDefined();
+    const states = updates
+      .filter((u) => u.update?._meta?.turnId === internalTurnId)
+      .map((u) => u.update?._meta?.jaz?.stateUpdate?.state)
+      .filter((state) => state !== undefined);
+    expect(states).toEqual(['working', 'idle']);
+  }, 30_000);
+
+  it('rolls a prompt_only flush into the follow-up notification turn instead of settling empty', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('notify one work', first.gate);
+    injectNotification(c, created.sessionId, 'task:one:completed', '<notification>one</notification>');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'queued user question' }],
+    });
+    await sleep(500);
+    injectNotification(c, created.sessionId, 'task:two:completed', '<notification>two</notification>');
+
+    scripted!.mockNextText('notify two answers the question');
+    first.release();
+
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+    expect(chunkTexts(c)).toContain('notify two answers the question');
+  }, 30_000);
+
+  type WorkUpdate = {
+    sessionUpdate?: string;
+    asyncTaskId?: string;
+    state?: string;
+    canStop?: boolean;
+    _meta?: { jaz?: { stateUpdate?: { state?: string; tasks?: string[] } } };
+  };
+
+  const workUpdates = (c: TestClient): WorkUpdate[] =>
+    c
+      .sessionUpdates()
+      .map((m) => (m.params as { update?: WorkUpdate }).update ?? {})
+      .filter((u) => u._meta?.jaz?.stateUpdate !== undefined || u.asyncTaskId !== undefined);
+
+  const backgroundSleep = (id: string, seconds: number) => ({
+    type: 'function' as const,
+    id,
+    name: 'Bash',
+    arguments: JSON.stringify({ command: `sleep ${seconds}`, description: 'nap', run_in_background: true }),
+  });
+
+  async function bootBackground(): Promise<{ c: TestClient; sessionId: string }> {
+    const c = await boot();
+    c.onRequest('session/request_permission', () => ({
+      outcome: { outcome: 'selected', optionId: 'approve_once' },
+    }));
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    return { c, sessionId: created.sessionId };
+  }
+
+  it('answers session/prompt only after the turns mid-turn background notifications start', async () => {
+    const { c, sessionId } = await bootBackground();
+    scripted!.mockNextResponse(backgroundSleep('call_a', 1), backgroundSleep('call_b', 1));
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_fg',
+      name: 'Bash',
+      arguments: JSON.stringify({ command: 'sleep 3' }),
+    });
+    scripted!.mockNextText('read the finished task');
+
+    const result = (await c.send('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: 'run it' }],
+    })) as { stopReason: string };
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(scripted!.callCount()).toBe(3);
+    const response = c.received.findIndex((m) => (m.result as { stopReason?: string } | undefined)?.stopReason !== undefined);
+    const answer = c.received.findIndex(
+      (m) => (m.params as { update?: { content?: { text?: string } } } | undefined)?.update?.content?.text === 'read the finished task',
+    );
+    expect(answer).toBeGreaterThanOrEqual(0);
+    expect(answer).toBeLessThan(response);
+    const updates = workUpdates(c);
+    const tasks = updates.filter((u) => u.sessionUpdate === 'async_task_spawned').map((u) => u.asyncTaskId);
+    expect(tasks).toHaveLength(2);
+    const states = updates.flatMap((u) => u._meta?.jaz?.stateUpdate ?? []);
+    expect(states).toEqual([
+      { state: 'working', tasks: [] },
+      { state: 'idle', stopReason: 'end_turn', tasks: expect.any(Array) },
+    ]);
+    expect(states[1]?.tasks?.toSorted()).toEqual(tasks.toSorted());
+  }, 30_000);
+
+  it('reports the run a background task starts after the prompt with the task it took in', async () => {
+    const { c, sessionId } = await bootBackground();
+    scripted!.mockNextResponse(backgroundSleep('call_bg', 1));
+    scripted!.mockNextText('started in the background');
+    scripted!.mockNextText('the task finished');
+
+    const result = (await c.send('session/prompt', {
+      sessionId,
+      prompt: [{ type: 'text', text: 'run it' }],
+    })) as { stopReason: string };
+    expect(result.stopReason).toBe('end_turn');
+    expect(scripted!.callCount()).toBe(2);
+
+    await vi.waitFor(() => { expect(workUpdates(c)).toHaveLength(6); }, { timeout: 10_000 });
+    const updates = workUpdates(c);
+    const task = updates[1]?.asyncTaskId;
+    expect(updates.map((u) => u.sessionUpdate === 'session_info_update' ? u._meta?.jaz?.stateUpdate : u.state)).toEqual([
+      { state: 'working', tasks: [] },
+      undefined,
+      { state: 'idle', stopReason: 'end_turn', tasks: [] },
+      'completed',
+      { state: 'working', tasks: [task] },
+      { state: 'idle', stopReason: 'end_turn', tasks: [] },
+    ]);
+    expect(chunkTexts(c)).toContain('the task finished');
+  }, 30_000);
+
+  it('stops a background task on _session/async_task/stop', async () => {
+    const { c, sessionId } = await bootBackground();
+    scripted!.mockNextResponse(backgroundSleep('call_bg', 30));
+    scripted!.mockNextText('started in the background');
+    await c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'run it' }] });
+
+    const spawned = workUpdates(c).find((u) => u.sessionUpdate === 'async_task_spawned');
+    expect(spawned?.canStop).toBe(true);
+    const stop = { sessionId, asyncTaskId: spawned!.asyncTaskId };
+    expect(await c.send('_session/async_task/stop', stop)).toEqual({ stopped: true });
+    await vi.waitFor(() => {
+      expect(workUpdates(c).find((u) => u.sessionUpdate === 'async_task_state_update')?.state).toBe('stopped');
+    }, { timeout: 10_000 });
+    expect(await c.send('_session/async_task/stop', stop)).toEqual({ stopped: false });
+  }, 30_000);
+
+  it('cancels a prompt still queued behind an engine-internal turn', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('notify work', first.gate);
+    injectNotification(c, created.sessionId, 'task:test:completed', '<notification>one</notification>');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'queued message' }],
+    });
+    await sleep(500);
+    c.notify('session/cancel', { sessionId: created.sessionId });
+
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('cancelled');
+
+    first.release();
+    await sleep(1_000);
+    expect(scripted!.callCount()).toBe(1);
+  }, 30_000);
+
+  it('queues a second prompt behind the in-flight one and answers both in order', async () => {
+    const c = await boot();
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+
+    const first = deferred();
+    scripted!.mockNextGatedText('first answer', first.gate);
+    const prompt1 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'first' }],
+    });
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(1); }, { timeout: 10_000 });
+
+    scripted!.mockNextText('second answer');
+    const prompt2 = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'second' }],
+    });
+    const early = await Promise.race([
+      prompt2.then(() => 'settled' as const),
+      sleep(500).then(() => 'pending' as const),
+    ]);
+    expect(early).toBe('pending');
+    expect(scripted!.callCount()).toBe(1);
+
+    first.release();
+    const result1 = (await prompt1) as { stopReason: string };
+    const result2 = (await prompt2) as { stopReason: string };
+    expect(result1.stopReason).toBe('end_turn');
+    expect(result2.stopReason).toBe('end_turn');
+    await vi.waitFor(() => { expect(scripted!.callCount()).toBe(2); }, { timeout: 10_000 });
+
+    const texts = chunkTexts(c);
+    expect(texts.indexOf('first answer')).toBeGreaterThanOrEqual(0);
+    expect(texts.indexOf('second answer')).toBeGreaterThan(texts.indexOf('first answer'));
   }, 30_000);
 });
 
@@ -921,7 +1438,14 @@ describe('acp-server terminal reverse-RPC (clientCapabilities.terminal)', () => 
   type ToolCallUpdate = {
     sessionUpdate?: string;
     status?: string;
-    content?: Array<{ type?: string; terminalId?: string; content?: { text?: string } }>;
+    content?: Array<{
+      type?: string;
+      terminalId?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+      content?: { type?: string; text?: string };
+    }>;
   };
 
   const toolCallUpdates = (c: TestClient): ToolCallUpdate[] =>
@@ -977,5 +1501,27 @@ describe('acp-server terminal reverse-RPC (clientCapabilities.terminal)', () => 
     const completed = toolCallUpdates(c).find((u) => u.status === 'completed');
     const text = completed?.content?.map((entry) => entry.content?.text ?? '').join('\n') ?? '';
     expect(text).toContain('hello_from_bash');
+  }, 30_000);
+
+  it('keeps the Edit diff in the completed tool call content', async () => {
+    const c = await boot({});
+    const path = join(homeDir!, 'note.txt');
+    await writeFile(path, 'before\n');
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_edit',
+      name: 'Edit',
+      arguments: JSON.stringify({ path, old_string: 'before\n', new_string: 'after\n' }),
+    });
+    scripted!.mockNextText('edited');
+
+    const { stopReason } = await runPrompt(c);
+    expect(stopReason).toBe('end_turn');
+
+    const completed = toolCallUpdates(c).find((u) => u.status === 'completed');
+    expect(completed?.content).toEqual([
+      { type: 'diff', path, oldText: 'before\n', newText: 'after\n' },
+      { type: 'content', content: { type: 'text', text: `Replaced 1 occurrence in ${path}` } },
+    ]);
   }, 30_000);
 });
