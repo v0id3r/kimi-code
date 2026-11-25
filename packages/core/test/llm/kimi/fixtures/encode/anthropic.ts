@@ -17,6 +17,7 @@ export const kimiAnthropicEncodeFixtures = [{
   expected: {
     params: {
       model: 'kimi-for-coding',
+      cache_control: { type: 'ephemeral', ttl: '1h' },
       max_tokens: 64_000,
       thinking: { type: 'enabled' },
       output_config: { effort: 'high' },

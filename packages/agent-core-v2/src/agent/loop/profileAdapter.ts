@@ -56,7 +56,7 @@ export class AgentLoopProfileAdapter implements EffectiveProfileReader {
   }
 
   getSystemPrompt(): string {
-    return this.snapshot().systemPrompt;
+    return this.profile.getSystemPrompt(this.snapshot());
   }
 
   getAgentsMdWarning(): string | undefined {

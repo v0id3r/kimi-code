@@ -1344,6 +1344,25 @@ describe('WireService readRestoreChains', () => {
     expect(stub.journalRef.branch).toBe('b1');
   });
 
+  it('reloads records appended by the same agent while reading', async () => {
+    await wire.seal();
+    await wire.flush();
+    const readStream = storage.readStream.bind(storage);
+    let appended = false;
+    storage.readStream = async function* (scope, key, range) {
+      yield* readStream(scope, key, range);
+      if (!appended) {
+        appended = true;
+        wire.appendRecord({ type: 'wire.test.late', time: 2 });
+      }
+    };
+
+    const chains = await wire.readRestoreChains();
+
+    expect(chains.journal.map((record) => record.type)).toEqual(['metadata', 'wire.test.late']);
+    expect(log.externallyModified(testWireScope(SCOPE, KEY), AGENT_WIRE_RECORD_KEY)).toBe(false);
+  });
+
   it('bootstraps the metadata envelope onto an empty journal', async () => {
     const chains = await wire.readRestoreChains();
 

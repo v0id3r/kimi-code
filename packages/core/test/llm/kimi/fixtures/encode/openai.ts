@@ -70,6 +70,7 @@ export const kimiOpenAIEncodeFixtures = [{
   expected: {
     params: {
       model: 'kimi-for-coding',
+      prompt_cache_options: { mode: 'implicit', ttl: '1h' },
       messages: [
         {
           role: 'system',

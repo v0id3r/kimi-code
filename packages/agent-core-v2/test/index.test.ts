@@ -267,6 +267,9 @@ describe('conversation-time checkpoint registration', () => {
     'turn',
     'fullCompaction.wireRanges',
     'swarmReminderDelivered',
+    // Cleared results stay cleared across undo: the projection is
+    // monotonic until a full compaction resets it.
+    'microCompaction',
   ]);
   const CONTEXT_OWNER_STATE = 'contextMemory';
   const CONTEXT_EVENTS: readonly Event2Class[] = [
