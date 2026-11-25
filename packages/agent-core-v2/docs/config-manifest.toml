@@ -43,6 +43,7 @@
 #   watch                    src/app/watch/configSection.ts
 #   workspace                src/workspace/workspaceTrust/configSection.ts
 #   (overlay) servicesCredentialEnvOverlay  src/app/auth/configSection.ts
+#   (overlay) overlay  src/app/config/configOverlayContributions.d.ts
 #   (overlay) kimiModelEnvOverlay  src/app/kosongConfig/envOverlay.ts
 
 # ##########################################################################
